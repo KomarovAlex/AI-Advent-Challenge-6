@@ -15,6 +15,6 @@ class ChatRepository(
                 content = it.text
             )
         }
-        return api.sendMessage(ChatRequest(messages = apiMessages, model = model))
+        return api.sendMessage(ChatRequest(messages = apiMessages, model = model, max_tokens = 250, stop = listOf("===КОНЕЦ===", "-end-")))
     }
 }
