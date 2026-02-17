@@ -25,21 +25,26 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import ru.koalexse.aichallenge.domain.Message
+import ru.koalexse.aichallenge.ui.state.ChatUiState
 
 @Composable
 fun ChatScreen(
-    viewModel: ChatViewModel
+    uiState: State<ChatUiState>,
+    onIntent: (ChatIntent) -> Unit,
 ) {
-    val state by viewModel.state.collectAsState()
+    val state by uiState
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -84,7 +89,7 @@ fun ChatScreen(
         ) {
             OutlinedTextField(
                 value = state.currentInput,
-                onValueChange = { viewModel.handleIntent(ChatIntent.UpdateInput(it)) },
+                onValueChange = { onIntent(ChatIntent.UpdateInput(it)) },
                 modifier = Modifier.weight(1f),
                 placeholder = { Text("Type a message...") },
                 enabled = !state.isLoading,
@@ -95,7 +100,7 @@ fun ChatScreen(
 
             Button(
                 onClick = {
-                    viewModel.handleIntent(ChatIntent.SendMessage(state.currentInput))
+                    onIntent(ChatIntent.SendMessage(state.currentInput))
                     scope.launch {
                         listState.animateScrollToItem(state.messages.size)
                     }
@@ -111,11 +116,11 @@ fun ChatScreen(
     // Ошибка
     if (state.error != null) {
         AlertDialog(
-            onDismissRequest = { viewModel.handleIntent(ChatIntent.ClearError) },
+            onDismissRequest = { onIntent(ChatIntent.ClearError) },
             title = { Text("Error") },
             text = { Text(state.error!!) },
             confirmButton = {
-                TextButton(onClick = { viewModel.handleIntent(ChatIntent.ClearError) }) {
+                TextButton(onClick = { onIntent(ChatIntent.ClearError) }) {
                     Text("OK")
                 }
             }
@@ -155,4 +160,9 @@ fun MessageBubble(message: Message) {
             )
         }
     }
+}
+
+@[Composable Preview]
+fun ChatScreenPreview() {
+    ChatScreen(remember { mutableStateOf(ChatUiState()) }) { }
 }

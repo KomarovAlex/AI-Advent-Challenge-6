@@ -9,7 +9,11 @@ data class Message(
 )
 
 data class ChatRequest(
-    val messages: List<ApiMessage>
+    val messages: List<ApiMessage>,
+    val model: String,
+    val stop: String? = null,
+    val max_tokens: Long? = null,
+    val temperature: Float? = null,
 )
 
 data class ApiMessage(
