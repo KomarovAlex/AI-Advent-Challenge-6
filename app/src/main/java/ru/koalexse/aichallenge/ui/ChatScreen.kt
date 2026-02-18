@@ -51,13 +51,20 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    // Получаем текст последнего сообщения для отслеживания изменений при стриминге
-    val lastMessageText = state.messages.lastOrNull()?.text ?: ""
-
-    // Автоскролл к новым сообщениям и при обновлении текста (стриминг)
-    LaunchedEffect(state.messages.size, lastMessageText) {
+    // Автоскролл при добавлении новых сообщений
+    LaunchedEffect(state.messages.size) {
         if (state.messages.isNotEmpty()) {
             listState.animateScrollToItem(state.messages.lastIndex)
+        }
+    }
+
+    // Следим за последним сообщением
+    val lastMessage = state.messages.lastOrNull()
+    LaunchedEffect(lastMessage?.text) {
+        lastMessage?.let {
+            if (it.isLoading && state.messages.isNotEmpty()) {
+                listState.scrollToItem(0)
+            }
         }
     }
 
@@ -74,9 +81,10 @@ fun ChatScreen(
         LazyColumn(
             modifier = Modifier.weight(1f),
             state = listState,
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            reverseLayout = true
         ) {
-            items(state.messages, key = { it.id }) { message ->
+            items(state.messages.reversed(), key = { it.id }) { message ->
                 MessageBubble(message = message)
             }
         }
@@ -177,5 +185,22 @@ fun MessageBubble(message: Message) {
 
 @[Composable Preview]
 fun ChatScreenPreview() {
-    ChatScreen(remember { mutableStateOf(ChatUiState()) }) { }
+    ChatScreen(remember {
+        mutableStateOf(
+            ChatUiState(
+                messages = listOf(
+                    Message(
+                        "1",
+                        true,
+                        "1"
+                    ),
+                    Message(
+                        "2",
+                        false,
+                        "2"
+                    )
+                )
+            )
+        )
+    }) { }
 }
