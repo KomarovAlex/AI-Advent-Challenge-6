@@ -1,5 +1,6 @@
 package ru.koalexse.aichallenge.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -32,6 +33,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,8 +51,11 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    // Автоскролл к новым сообщениям
-    LaunchedEffect(state.messages.size) {
+    // Получаем текст последнего сообщения для отслеживания изменений при стриминге
+    val lastMessageText = state.messages.lastOrNull()?.text ?: ""
+
+    // Автоскролл к новым сообщениям и при обновлении текста (стриминг)
+    LaunchedEffect(state.messages.size, lastMessageText) {
         if (state.messages.isNotEmpty()) {
             listState.animateScrollToItem(state.messages.lastIndex)
         }
@@ -70,7 +76,7 @@ fun ChatScreen(
             state = listState,
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            items(state.messages) { message ->
+            items(state.messages, key = { it.id }) { message ->
                 MessageBubble(message = message)
             }
         }
@@ -153,9 +159,16 @@ fun MessageBubble(message: Message) {
                     MaterialTheme.colorScheme.secondaryContainer
             )
         ) {
+            val clipboardManager = LocalClipboardManager.current
             Text(
                 text = message.text,
-                modifier = Modifier.padding(12.dp),
+                modifier = Modifier
+                    .padding(12.dp)
+                    .clickable {
+                        if (!message.isLoading) {
+                            clipboardManager.setText(AnnotatedString(message.text))
+                        }
+                    },
                 fontSize = 16.sp
             )
         }
