@@ -38,12 +38,10 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.launch
 import ru.koalexse.aichallenge.domain.Message
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 
-@OptIn(FlowPreview::class)
 @Composable
 fun ChatScreen(
     uiState: State<ChatUiState>,
