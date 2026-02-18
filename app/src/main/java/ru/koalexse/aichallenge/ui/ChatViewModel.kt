@@ -5,6 +5,10 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.koalexse.aichallenge.data.ChatRepository
 import ru.koalexse.aichallenge.domain.Message
@@ -36,53 +40,95 @@ class ChatViewModel(
     }
 
     private fun sendMessage(text: String) {
-        val userMessage = Message(
-            isUser = true,
-            text = text
-        )
-
-        // Добавляем сообщение пользователя и показываем загрузку
-        _state.value = _state.value.copy(
-            messages = _state.value.messages + userMessage,
-            currentInput = "",
-            isLoading = true,
-            error = null
-        )
-
-        // Добавляем плейсхолдер для ответа
-        val loadingMessage = Message(
-            isUser = false,
-            text = "...",
-            isLoading = true
-        )
-        _state.value = _state.value.copy(
-            messages = _state.value.messages + loadingMessage
-        )
+        val userMessage = createUserMessage(text)
+        updateStateWithUserMessage(userMessage)
 
         viewModelScope.launch {
-            val result = repository.sendMessage(
-                messages = _state.value.messages
+            val assistantMessageId = generateMessageId()
+            showAssistantLoading(assistantMessageId)
+
+            handleAssistantStream(assistantMessageId)
+        }
+    }
+
+    private fun createUserMessage(text: String) = Message(
+        id = generateMessageId("user"),
+        isUser = true,
+        text = text
+    )
+
+    private fun generateMessageId(prefix: String = "msg") =
+        "${System.currentTimeMillis()}_$prefix"
+
+    private fun updateStateWithUserMessage(userMessage: Message) {
+        _state.update { currentState ->
+            currentState.copy(
+                messages = currentState.messages + userMessage,
+                currentInput = "",
+                error = null
             )
+        }
+    }
 
-            // Убираем loading сообщение
-            val messagesWithoutLoading = _state.value.messages.filter { !it.isLoading }
+    private suspend fun handleAssistantStream(messageId: String) {
+        repository.sendMessage(messages = _state.value.messages)
+            .onEach { chunk -> updateAssistantMessage(messageId, chunk) }
+            .catch { error -> handleAssistantError(messageId, error) }
+            .collect()
 
-            result.onSuccess { response ->
-                // Добавляем ответ ассистента
-                _state.value = _state.value.copy(
-                    messages = messagesWithoutLoading + Message(
-                        isUser = false,
-                        text = response
-                    ),
-                    isLoading = false
-                )
-            }.onFailure { error ->
-                _state.value = _state.value.copy(
-                    messages = messagesWithoutLoading,
-                    isLoading = false,
-                    error = error.message ?: "Unknown error"
-                )
+        finishAssistantMessage(messageId)
+    }
+
+    private fun showAssistantLoading(messageId: String) {
+        _state.update { currentState ->
+            currentState.copy(
+                messages = currentState.messages + Message(
+                    id = messageId,
+                    isUser = false,
+                    text = "",
+                    isLoading = true
+                ),
+                isLoading = true
+            )
+        }
+    }
+
+    private fun updateAssistantMessage(messageId: String, chunk: String) {
+        _state.update { currentState ->
+            val updatedMessages = currentState.messages.map { message ->
+                if (message.id == messageId) {
+                    message.copy(text = message.text + chunk)
+                } else {
+                    message
+                }
             }
+            currentState.copy(messages = updatedMessages)
+        }
+    }
+
+    private fun finishAssistantMessage(messageId: String) {
+        _state.update { currentState ->
+            val updatedMessages = currentState.messages.map { message ->
+                if (message.id == messageId) {
+                    message.copy(isLoading = false)
+                } else {
+                    message
+                }
+            }
+            currentState.copy(
+                messages = updatedMessages,
+                isLoading = false
+            )
+        }
+    }
+
+    private fun handleAssistantError(messageId: String, error: Throwable) {
+        _state.update { currentState ->
+            currentState.copy(
+                messages = currentState.messages.filter { it.id != messageId },
+                isLoading = false,
+                error = error.message ?: "Unknown error"
+            )
         }
     }
 }

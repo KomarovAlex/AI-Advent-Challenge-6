@@ -14,6 +14,7 @@ data class ChatRequest(
     val stop: List<String>? = null,
     val max_tokens: Long? = null,
     val temperature: Float? = null,
+    val stream: Boolean = false,
 )
 
 data class ApiMessage(
@@ -26,5 +27,10 @@ data class ChatResponse(
 )
 
 data class Choice(
-    val message: ApiMessage
+    val message: ApiMessage? = null,
+    val delta: Delta? = null
+)
+
+data class Delta(
+    val content: String? = null
 )
