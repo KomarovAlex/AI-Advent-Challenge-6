@@ -1,6 +1,6 @@
 package ru.koalexse.aichallenge.ui
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,10 +28,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -38,34 +41,49 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import ru.koalexse.aichallenge.domain.Message
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 
+@OptIn(FlowPreview::class)
 @Composable
 fun ChatScreen(
     uiState: State<ChatUiState>,
     onIntent: (ChatIntent) -> Unit,
 ) {
-    val state by uiState
     val listState = rememberLazyListState()
-    val scope = rememberCoroutineScope()
+    val currentOnIntent by rememberUpdatedState(onIntent)
+    val currentUiState by rememberUpdatedState(uiState.value)
+
+    // Оптимизированное получение значений
+    val messages by remember { derivedStateOf { currentUiState.messages } }
+    val isLoading by remember { derivedStateOf { currentUiState.isLoading } }
+    val currentInput by remember { derivedStateOf { currentUiState.currentInput } }
+    val error by remember { derivedStateOf { currentUiState.error } }
 
     // Автоскролл при добавлении новых сообщений
-    LaunchedEffect(state.messages.size) {
-        if (state.messages.isNotEmpty()) {
-            listState.animateScrollToItem(state.messages.lastIndex)
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(0)
         }
     }
 
-    // Следим за последним сообщением
-    val lastMessage = state.messages.lastOrNull()
-    LaunchedEffect(lastMessage?.text) {
-        lastMessage?.let {
-            if (it.isLoading && state.messages.isNotEmpty()) {
-                listState.scrollToItem(0)
-            }
+    // Автоскролл при стриминге (обновление текста последнего сообщения)
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            val lastMessage = uiState.value.messages.lastOrNull()
+            lastMessage?.text?.length to lastMessage?.isLoading
         }
+            .distinctUntilChanged()
+            .debounce(50)
+            .collect { (_, isMessageLoading) ->
+                val size = uiState.value.messages.size
+                if (isMessageLoading == true && size > 0) {
+                    listState.scrollToItem(0)
+                }
+            }
     }
 
     Column(
@@ -73,79 +91,122 @@ fun ChatScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-
-
         Spacer(modifier = Modifier.height(16.dp))
 
         // Список сообщений
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            state = listState,
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            reverseLayout = true
-        ) {
-            items(state.messages.reversed(), key = { it.id }) { message ->
-                MessageBubble(message = message)
-            }
-        }
+        MessageList(
+            messages = messages,
+            listState = listState,
+            modifier = Modifier.weight(1f)
+        )
 
+        Spacer(modifier = Modifier.height(16.dp))
         // Индикатор загрузки
-        if (state.isLoading) {
+        if (isLoading) {
             LinearProgressIndicator(
                 modifier = Modifier.fillMaxWidth()
             )
         }
 
         // Поле ввода сообщения
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = state.currentInput,
-                onValueChange = { onIntent(ChatIntent.UpdateInput(it)) },
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("Type a message...") },
-                enabled = !state.isLoading,
-                maxLines = 3
-            )
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            Button(
-                onClick = {
-                    onIntent(ChatIntent.SendMessage(state.currentInput))
-                    scope.launch {
-                        listState.animateScrollToItem(state.messages.size)
-                    }
-                },
-                enabled = state.currentInput.isNotBlank() &&
-                        !state.isLoading
-            ) {
-                Text("Send")
+        InputRow(
+            currentInput = currentInput,
+            isLoading = isLoading,
+            onInputChange = remember { { text: String -> currentOnIntent(ChatIntent.UpdateInput(text)) } },
+            onSendClick = remember {
+                {
+                    currentOnIntent(ChatIntent.SendMessage(uiState.value.currentInput))
+                }
             }
-        }
+        )
     }
 
     // Ошибка
-    if (state.error != null) {
-        AlertDialog(
-            onDismissRequest = { onIntent(ChatIntent.ClearError) },
-            title = { Text("Error") },
-            text = { Text(state.error!!) },
-            confirmButton = {
-                TextButton(onClick = { onIntent(ChatIntent.ClearError) }) {
-                    Text("OK")
-                }
-            }
+    if (error != null) {
+        ErrorDialog(
+            error = error!!,
+            onDismiss = remember { { currentOnIntent(ChatIntent.ClearError) } }
         )
     }
 }
 
 @Composable
-fun MessageBubble(message: Message) {
-    val isUser = message.isUser
+private fun MessageList(
+    messages: List<Message>,
+    listState: LazyListState,
+    modifier: Modifier = Modifier
+) {
+    val messageList = remember(messages) { messages.reversed() }
+    LazyColumn(
+        modifier = modifier,
+        state = listState,
+        verticalArrangement = Arrangement.Bottom,
+        reverseLayout = true
+    ) {
+        items(messageList, key = { it.id }) { message ->
+            MessageBubble(
+                isUser = message.isUser,
+                text = message.text,
+                isLoading = message.isLoading
+            )
+        }
+    }
+}
 
+@Composable
+private fun InputRow(
+    currentInput: String,
+    isLoading: Boolean,
+    onInputChange: (String) -> Unit,
+    onSendClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = currentInput,
+            onValueChange = onInputChange,
+            modifier = Modifier.weight(1f),
+            placeholder = { Text("Type a message...") },
+            enabled = !isLoading,
+            maxLines = 3
+        )
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        Button(
+            onClick = onSendClick,
+            enabled = currentInput.isNotBlank() && !isLoading
+        ) {
+            Text("Send")
+        }
+    }
+}
+
+@Composable
+private fun ErrorDialog(
+    error: String,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Error") },
+        text = { Text(error) },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("OK")
+            }
+        }
+    )
+}
+
+@Composable
+private fun MessageBubble(
+    isUser: Boolean,
+    text: String,
+    isLoading: Boolean
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
@@ -169,14 +230,20 @@ fun MessageBubble(message: Message) {
         ) {
             val clipboardManager = LocalClipboardManager.current
             Text(
-                text = message.text,
+                text = text,
                 modifier = Modifier
                     .padding(12.dp)
-                    .clickable {
-                        if (!message.isLoading) {
-                            clipboardManager.setText(AnnotatedString(message.text))
+                    .combinedClickable(
+                        onClick = {
+                            // Можно добавить дополнительное действие при нажатии
+                        },
+                        onLongClick = {
+
+                            if (!isLoading) {
+                                clipboardManager.setText(AnnotatedString(text))
+                            }
                         }
-                    },
+                    ),
                 fontSize = 16.sp
             )
         }
