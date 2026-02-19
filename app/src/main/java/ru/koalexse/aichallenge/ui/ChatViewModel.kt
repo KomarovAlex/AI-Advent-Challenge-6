@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -73,10 +74,9 @@ class ChatViewModel(
     private suspend fun handleAssistantStream(messageId: String) {
         repository.sendMessage(messages = _state.value.messages)
             .onEach { chunk -> updateAssistantMessage(messageId, chunk) }
+            .onCompletion {finishAssistantMessage(messageId)  }
             .catch { error -> handleAssistantError(messageId, error) }
             .collect()
-
-        finishAssistantMessage(messageId)
     }
 
     private fun showAssistantLoading(messageId: String) {
