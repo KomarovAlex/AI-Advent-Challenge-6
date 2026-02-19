@@ -50,6 +50,7 @@ import ru.koalexse.aichallenge.ui.state.ChatUiState
 @OptIn(FlowPreview::class)
 @Composable
 fun ChatScreen(
+    modifier: Modifier,
     uiState: State<ChatUiState>,
     onIntent: (ChatIntent) -> Unit,
 ) {
@@ -87,7 +88,7 @@ fun ChatScreen(
     }
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
@@ -127,6 +128,14 @@ fun ChatScreen(
             error = error!!,
             onDismiss = remember { { currentOnIntent(ChatIntent.ClearError) } }
         )
+    }
+
+    if (currentUiState.isSettingsOpen) {
+        MultiFieldInputDialog(
+            currentUiState.settingsData,
+            onDismiss = { onIntent(ChatIntent.OpenSettings) }) {
+            currentOnIntent(ChatIntent.SaveSettings(it))
+        }
     }
 }
 
@@ -252,7 +261,7 @@ private fun MessageBubble(
 
 @[Composable Preview]
 fun ChatScreenPreview() {
-    ChatScreen(remember {
+    ChatScreen(modifier = Modifier, remember {
         mutableStateOf(
             ChatUiState(
                 messages = listOf(

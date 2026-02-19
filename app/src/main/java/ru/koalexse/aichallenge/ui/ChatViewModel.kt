@@ -37,6 +37,22 @@ class ChatViewModel(
             is ChatIntent.ClearError -> {
                 _state.value = _state.value.copy(error = null)
             }
+
+            ChatIntent.OpenSettings -> {
+                _state.update {
+                    it.copy(isSettingsOpen = !it.isSettingsOpen)
+                }
+            }
+
+            is ChatIntent.SaveSettings -> {
+                _state.update {
+                    it.copy(settingsData = intent.settingsData, isSettingsOpen = false)
+                }
+            }
+
+            ChatIntent.ClearSession -> {
+                _state.update { it.copy(messages = emptyList()) }
+            }
         }
     }
 
@@ -72,9 +88,16 @@ class ChatViewModel(
     }
 
     private suspend fun handleAssistantStream(messageId: String) {
-        repository.sendMessage(messages = _state.value.messages)
+        val temperature =
+            runCatching { _state.value.settingsData.temperature?.toFloat() }.getOrNull()
+        val tokens = runCatching { _state.value.settingsData.tokens?.toLong() }.getOrNull()
+        repository.sendMessage(
+            messages = _state.value.messages,
+            temperature = temperature,
+            tokens = tokens,
+        )
             .onEach { chunk -> updateAssistantMessage(messageId, chunk) }
-            .onCompletion {finishAssistantMessage(messageId)  }
+            .onCompletion { finishAssistantMessage(messageId) }
             .catch { error -> handleAssistantError(messageId, error) }
             .collect()
     }
@@ -137,4 +160,7 @@ sealed class ChatIntent {
     data class UpdateInput(val text: String) : ChatIntent()
     data class SendMessage(val text: String) : ChatIntent()
     data object ClearError : ChatIntent()
+    data object ClearSession : ChatIntent()
+    data object OpenSettings : ChatIntent()
+    data class SaveSettings(val settingsData: SettingsData) : ChatIntent()
 }

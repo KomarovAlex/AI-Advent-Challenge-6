@@ -9,13 +9,25 @@ class ChatRepository(
     private val api: LLMApi,
     private val model: String,
 ) {
-    fun sendMessage(messages: List<Message>): Flow<String> {
+    fun sendMessage(
+        messages: List<Message>,
+        temperature: Float? = null,
+        tokens: Long? = null,
+    ): Flow<String> {
         val apiMessages = messages.filter { !it.isLoading }.map {
             ApiMessage(
                 role = if (it.isUser) "user" else "assistant",
                 content = it.text
             )
         }
-        return api.sendMessageStream(ChatRequest(messages = apiMessages, model = model, stop = listOf("===КОНЕЦ===", "-end-")))
+        return api.sendMessageStream(
+            ChatRequest(
+                messages = apiMessages,
+                model = model,
+                temperature = temperature,
+                max_tokens = tokens,
+                stop = listOf("===КОНЕЦ===", "-end-")
+            )
+        )
     }
 }
