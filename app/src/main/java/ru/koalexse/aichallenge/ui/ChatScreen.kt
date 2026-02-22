@@ -270,12 +270,14 @@ private fun MessageBubble(
                 if (!isUser && tokenStats != null && !isLoading) {
                     Spacer(modifier = Modifier.height(8.dp))
                     val durationSeconds = (responseDurationMs ?: 0L) / 1000f
+                    val ttft = tokenStats.timeToFirstTokenMs ?: 0L
                     Text(
                         text = stringResource(
                             R.string.token_stats_format,
                             tokenStats.promptTokens,
                             tokenStats.completionTokens,
                             tokenStats.totalTokens,
+                            ttft,
                             durationSeconds
                         ),
                         fontSize = 11.sp,
@@ -302,7 +304,7 @@ fun ChatScreenPreview() {
                         "2",
                         false,
                         "2",
-                        tokenStats = TokenStats(100, 50, 150),
+                        tokenStats = TokenStats(100, 50, 150, timeToFirstTokenMs = 350),
                         responseDurationMs = 2500L
                     )
                 ),

@@ -4,7 +4,7 @@
     <string name="send_button">Send</string>
     <string name="error_dialog_title">Error</string>
     <string name="error_dialog_ok">OK</string>
-    <string name="token_stats_format">📊 Токены: \nprompt=%1$d, completion=%2$d, total=%3$d\n⏱️ Время: %4$.1f сек</string>
+    <string name="token_stats_format">📊 Токены: \nprompt=%1$d, completion=%2$d, total=%3$d\n⏱️ TTFT: %4$d мс | Всего: %5$.1f сек</string>
     <string name="settings_title">Settings</string>
     <string name="settings_model_label">model</string>
     <string name="settings_temperature_label">temperature</string>

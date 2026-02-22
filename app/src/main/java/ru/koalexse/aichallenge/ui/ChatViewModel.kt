@@ -13,7 +13,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.koalexse.aichallenge.data.ChatRepository
 import ru.koalexse.aichallenge.domain.Message
-import ru.koalexse.aichallenge.domain.StreamResult
+import ru.koalexse.aichallenge.domain.StatsStreamResult
 import ru.koalexse.aichallenge.domain.TokenStats
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 
@@ -107,8 +107,8 @@ class ChatViewModel(
         )
             .onEach { result ->
                 when (result) {
-                    is StreamResult.Content -> updateAssistantMessage(messageId, result.text)
-                    is StreamResult.Stats -> updateAssistantMessageStats(
+                    is StatsStreamResult.Content -> updateAssistantMessage(messageId, result.text)
+                    is StatsStreamResult.Stats -> updateAssistantMessageStats(
                         messageId,
                         result.tokenStats,
                         result.durationMs
