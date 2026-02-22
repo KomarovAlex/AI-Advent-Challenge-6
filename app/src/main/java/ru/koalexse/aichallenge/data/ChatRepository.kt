@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.Flow
 import ru.koalexse.aichallenge.domain.ApiMessage
 import ru.koalexse.aichallenge.domain.ChatRequest
 import ru.koalexse.aichallenge.domain.Message
+import ru.koalexse.aichallenge.domain.StreamResult
 
 class ChatRepository(
     private val api: LLMApi,
@@ -13,7 +14,7 @@ class ChatRepository(
         messages: List<Message>,
         temperature: Float? = null,
         tokens: Long? = null,
-    ): Flow<String> {
+    ): Flow<StreamResult> {
         val apiMessages = messages.filter { !it.isLoading }.map {
             ApiMessage(
                 role = if (it.isUser) "user" else "assistant",
