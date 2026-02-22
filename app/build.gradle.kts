@@ -56,8 +56,8 @@ android {
             )
             buildConfigField(
                 "String",
-                "OPENAI_MODEL",
-                "\"${secrets.getProperty("OPENAI_MODEL", "gpt-3.5-turbo")}\""
+                "OPENAI_MODELS",
+                "\"${secrets.getProperty("OPENAI_MODELS", "gpt-3.5-turbo")}\""
             )
         }
         debug {
@@ -78,8 +78,8 @@ android {
             )
             buildConfigField(
                 "String",
-                "OPENAI_MODEL",
-                "\"${secrets.getProperty("OPENAI_MODEL", "gpt-3.5-turbo")}\""
+                "OPENAI_MODELS",
+                "\"${secrets.getProperty("OPENAI_MODELS", "gpt-3.5-turbo")}\""
             )
         }
     }

@@ -28,6 +28,7 @@ import ru.koalexse.aichallenge.data.OpenAIApi
 import ru.koalexse.aichallenge.ui.ChatIntent
 import ru.koalexse.aichallenge.ui.ChatScreen
 import ru.koalexse.aichallenge.ui.ChatViewModel
+import ru.koalexse.aichallenge.ui.SettingsData
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 import ru.koalexse.aichallenge.ui.theme.AiChallengeTheme
 
@@ -39,8 +40,13 @@ class MainActivity : ComponentActivity() {
             url = BuildConfig.OPENAI_URL,
         )
     }
-    private val repository by lazy { ChatRepository(api, model = BuildConfig.OPENAI_MODEL) }
-    private val viewModel by lazy { ChatViewModel(repository) }
+    private val repository by lazy { ChatRepository(api) }
+    private val viewModel by lazy {
+        ChatViewModel(
+            repository,
+            availableModels = BuildConfig.OPENAI_MODELS.split(","),
+        )
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,7 +67,7 @@ fun Content(state: State<ChatUiState>, handleIntent: (ChatIntent) -> Unit) {
                 .navigationBarsPadding(),
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {
-                TopAppBar({ Text(BuildConfig.OPENAI_MODEL) }, actions = {
+                TopAppBar({ Text(state.value.settingsData.model) }, actions = {
                     IconButton(onClick = { handleIntent(ChatIntent.OpenSettings) }) {
                         Icon(
                             imageVector = Icons.Default.Settings,
@@ -88,5 +94,5 @@ fun Content(state: State<ChatUiState>, handleIntent: (ChatIntent) -> Unit) {
 
 @[Composable Preview]
 fun ContentPreview() {
-    Content(remember { mutableStateOf(ChatUiState()) }) { }
+    Content(remember { mutableStateOf(ChatUiState(settingsData = SettingsData("deepseek-v3.2"))) }) { }
 }

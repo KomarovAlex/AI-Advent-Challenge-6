@@ -5,7 +5,8 @@ import ru.koalexse.aichallenge.ui.SettingsData
 
 data class ChatUiState(
     val messages: List<Message> = emptyList(),
-    val settingsData: SettingsData = SettingsData(),
+    val availableModels: List<String> = emptyList(),
+    val settingsData: SettingsData,
     val currentInput: String = "",
     val isLoading: Boolean = false,
     val isSettingsOpen: Boolean = false,
