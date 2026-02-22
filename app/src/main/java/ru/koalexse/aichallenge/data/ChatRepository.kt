@@ -8,12 +8,12 @@ import ru.koalexse.aichallenge.domain.StreamResult
 
 class ChatRepository(
     private val api: LLMApi,
-    private val model: String,
 ) {
     fun sendMessage(
         messages: List<Message>,
         temperature: Float? = null,
         tokens: Long? = null,
+        model: String,
     ): Flow<StreamResult> {
         val apiMessages = messages.filter { !it.isLoading }.map {
             ApiMessage(

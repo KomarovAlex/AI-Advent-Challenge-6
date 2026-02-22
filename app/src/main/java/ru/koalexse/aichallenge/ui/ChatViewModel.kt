@@ -18,11 +18,17 @@ import ru.koalexse.aichallenge.domain.TokenStats
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 
 class ChatViewModel(
-    private val repository: ChatRepository
+    private val repository: ChatRepository,
+    private val availableModels: List<String>,
 ) : ViewModel() {
 
     // Единственный источник правды для UI
-    private val _state = MutableStateFlow(ChatUiState())
+    private val _state = MutableStateFlow(
+        ChatUiState(
+            availableModels = availableModels,
+            settingsData = SettingsData(availableModels.first())
+        )
+    )
     val state: StateFlow<ChatUiState> = _state.asStateFlow()
 
     // Обработка намерений пользователя
@@ -97,8 +103,9 @@ class ChatViewModel(
             messages = _state.value.messages,
             temperature = temperature,
             tokens = tokens,
+            model = state.value.settingsData.model
         )
-            .onEach { result -> 
+            .onEach { result ->
                 when (result) {
                     is StreamResult.Content -> updateAssistantMessage(messageId, result.text)
                     is StreamResult.Stats -> updateAssistantMessageStats(

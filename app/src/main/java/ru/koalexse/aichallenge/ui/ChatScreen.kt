@@ -135,8 +135,10 @@ fun ChatScreen(
 
     if (currentUiState.isSettingsOpen) {
         MultiFieldInputDialog(
-            currentUiState.settingsData,
-            onDismiss = { onIntent(ChatIntent.OpenSettings) }) {
+            settings = currentUiState.settingsData,
+            availableModels = currentUiState.availableModels,
+            onDismiss = { onIntent(ChatIntent.OpenSettings) }
+        ) {
             currentOnIntent(ChatIntent.SaveSettings(it))
         }
     }
@@ -303,7 +305,8 @@ fun ChatScreenPreview() {
                         tokenStats = TokenStats(100, 50, 150),
                         responseDurationMs = 2500L
                     )
-                )
+                ),
+                settingsData = SettingsData("deepseek-v3.2")
             )
         )
     }) { }
