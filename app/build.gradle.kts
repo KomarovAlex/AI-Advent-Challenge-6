@@ -104,6 +104,7 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.accompanist.systemuicontroller)
+    implementation(libs.multiplatform.markdown.renderer.m3)
 
     implementation(libs.okhttp)
     implementation(libs.retrofit)

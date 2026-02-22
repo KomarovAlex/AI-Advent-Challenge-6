@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.koalexse.aichallenge.data.ChatRepository
 import ru.koalexse.aichallenge.domain.Message
+import ru.koalexse.aichallenge.domain.StreamResult
+import ru.koalexse.aichallenge.domain.TokenStats
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 
 class ChatViewModel(
@@ -96,7 +98,16 @@ class ChatViewModel(
             temperature = temperature,
             tokens = tokens,
         )
-            .onEach { chunk -> updateAssistantMessage(messageId, chunk) }
+            .onEach { result -> 
+                when (result) {
+                    is StreamResult.Content -> updateAssistantMessage(messageId, result.text)
+                    is StreamResult.Stats -> updateAssistantMessageStats(
+                        messageId,
+                        result.tokenStats,
+                        result.durationMs
+                    )
+                }
+            }
             .onCompletion { finishAssistantMessage(messageId) }
             .catch { error -> handleAssistantError(messageId, error) }
             .collect()
@@ -121,6 +132,23 @@ class ChatViewModel(
             val updatedMessages = currentState.messages.map { message ->
                 if (message.id == messageId) {
                     message.copy(text = message.text + chunk)
+                } else {
+                    message
+                }
+            }
+            currentState.copy(messages = updatedMessages)
+        }
+    }
+
+    private fun updateAssistantMessageStats(
+        messageId: String,
+        tokenStats: TokenStats,
+        durationMs: Long
+    ) {
+        _state.update { currentState ->
+            val updatedMessages = currentState.messages.map { message ->
+                if (message.id == messageId) {
+                    message.copy(tokenStats = tokenStats, responseDurationMs = durationMs)
                 } else {
                     message
                 }

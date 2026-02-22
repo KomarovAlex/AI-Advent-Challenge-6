@@ -37,6 +37,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -44,7 +45,9 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import ru.koalexse.aichallenge.R
 import ru.koalexse.aichallenge.domain.Message
+import ru.koalexse.aichallenge.domain.TokenStats
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 
 @OptIn(FlowPreview::class)
@@ -156,7 +159,9 @@ private fun MessageList(
             MessageBubble(
                 isUser = message.isUser,
                 text = message.text,
-                isLoading = message.isLoading
+                isLoading = message.isLoading,
+                tokenStats = message.tokenStats,
+                responseDurationMs = message.responseDurationMs
             )
         }
     }
@@ -177,7 +182,7 @@ private fun InputRow(
             value = currentInput,
             onValueChange = onInputChange,
             modifier = Modifier.weight(1f),
-            placeholder = { Text("Type a message...") },
+            placeholder = { Text(stringResource(R.string.message_placeholder)) },
             enabled = !isLoading,
             maxLines = 3
         )
@@ -188,7 +193,7 @@ private fun InputRow(
             onClick = onSendClick,
             enabled = currentInput.isNotBlank() && !isLoading
         ) {
-            Text("Send")
+            Text(stringResource(R.string.send_button))
         }
     }
 }
@@ -200,11 +205,11 @@ private fun ErrorDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Error") },
+        title = { Text(stringResource(R.string.error_dialog_title)) },
         text = { Text(error) },
         confirmButton = {
             TextButton(onClick = onDismiss) {
-                Text("OK")
+                Text(stringResource(R.string.error_dialog_ok))
             }
         }
     )
@@ -214,7 +219,9 @@ private fun ErrorDialog(
 private fun MessageBubble(
     isUser: Boolean,
     text: String,
-    isLoading: Boolean
+    isLoading: Boolean,
+    tokenStats: TokenStats? = null,
+    responseDurationMs: Long? = null
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -238,8 +245,7 @@ private fun MessageBubble(
             )
         ) {
             val clipboardManager = LocalClipboardManager.current
-            Text(
-                text = text,
+            Column(
                 modifier = Modifier
                     .padding(12.dp)
                     .combinedClickable(
@@ -247,14 +253,34 @@ private fun MessageBubble(
                             // Можно добавить дополнительное действие при нажатии
                         },
                         onLongClick = {
-
                             if (!isLoading) {
                                 clipboardManager.setText(AnnotatedString(text))
                             }
                         }
-                    ),
-                fontSize = 16.sp
-            )
+                    )
+            ) {
+                Text(
+                    text = text,
+                    fontSize = 16.sp
+                )
+                
+                // Отображение статистики токенов и времени для сообщений ассистента
+                if (!isUser && tokenStats != null && !isLoading) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val durationSeconds = (responseDurationMs ?: 0L) / 1000f
+                    Text(
+                        text = stringResource(
+                            R.string.token_stats_format,
+                            tokenStats.promptTokens,
+                            tokenStats.completionTokens,
+                            tokenStats.totalTokens,
+                            durationSeconds
+                        ),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 }
@@ -273,7 +299,9 @@ fun ChatScreenPreview() {
                     Message(
                         "2",
                         false,
-                        "2"
+                        "2",
+                        tokenStats = TokenStats(100, 50, 150),
+                        responseDurationMs = 2500L
                     )
                 )
             )
