@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import ru.koalexse.aichallenge.data.ChatRepository
 import ru.koalexse.aichallenge.data.OpenAIApi
+import ru.koalexse.aichallenge.data.StatsTrackingLLMApi
 import ru.koalexse.aichallenge.ui.ChatIntent
 import ru.koalexse.aichallenge.ui.ChatScreen
 import ru.koalexse.aichallenge.ui.ChatViewModel
@@ -35,9 +36,11 @@ import ru.koalexse.aichallenge.ui.theme.AiChallengeTheme
 class MainActivity : ComponentActivity() {
     // Ручной DI - создаем зависимости здесь
     private val api by lazy {
-        OpenAIApi(
-            apiKey = BuildConfig.OPENAI_API_KEY,
-            url = BuildConfig.OPENAI_URL,
+        StatsTrackingLLMApi(
+            OpenAIApi(
+                apiKey = BuildConfig.OPENAI_API_KEY,
+                url = BuildConfig.OPENAI_URL,
+            )
         )
     }
     private val repository by lazy { ChatRepository(api) }

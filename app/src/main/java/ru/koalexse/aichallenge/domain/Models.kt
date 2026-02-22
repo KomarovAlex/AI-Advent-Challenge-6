@@ -13,7 +13,8 @@ data class Message(
 data class TokenStats(
     val promptTokens: Int,
     val completionTokens: Int,
-    val totalTokens: Int
+    val totalTokens: Int,
+    val timeToFirstTokenMs: Long? = null
 )
 
 data class ChatRequest(
@@ -58,5 +59,11 @@ data class Usage(
 // Sealed class для результатов стриминга
 sealed class StreamResult {
     data class Content(val text: String) : StreamResult()
-    data class Stats(val tokenStats: TokenStats, val durationMs: Long) : StreamResult()
+    data class TokenUsage(val usage: Usage) : StreamResult()
+}
+
+// Результат с полной статистикой (используется после обработки StatsTrackingLLMApi)
+sealed class StatsStreamResult {
+    data class Content(val text: String) : StatsStreamResult()
+    data class Stats(val tokenStats: TokenStats, val durationMs: Long) : StatsStreamResult()
 }
