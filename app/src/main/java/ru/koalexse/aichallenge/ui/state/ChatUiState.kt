@@ -1,7 +1,7 @@
 package ru.koalexse.aichallenge.ui.state
 
+import ru.koalexse.aichallenge.agent.AgentConfig
 import ru.koalexse.aichallenge.domain.Message
-import ru.koalexse.aichallenge.ui.SettingsData
 
 data class ChatUiState(
     val messages: List<Message> = emptyList(),
@@ -12,3 +12,18 @@ data class ChatUiState(
     val isSettingsOpen: Boolean = false,
     val error: String? = null,
 )
+
+data class SettingsData(
+    val model: String,
+    val temperature: String? = null,
+    val tokens: String? = null,
+)
+
+fun AgentConfig.toSettingsData() = SettingsData(
+    model = defaultModel,
+    temperature = defaultTemperature?.toString(),
+    tokens = defaultMaxTokens?.toString()
+)
+
+fun SettingsData.isEmpty() =
+    model.isEmpty() && temperature.isNullOrEmpty() && tokens.isNullOrEmpty()

@@ -22,14 +22,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import ru.koalexse.aichallenge.R
+import ru.koalexse.aichallenge.ui.state.SettingsData
+import ru.koalexse.aichallenge.ui.state.isEmpty
 
-data class SettingsData(
-    val model: String,
-    val temperature: String? = null,
-    val tokens: String? = null,
-)
-
-fun SettingsData.isEmpty() = model.isEmpty() && temperature.isNullOrEmpty() && tokens.isNullOrEmpty()
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
