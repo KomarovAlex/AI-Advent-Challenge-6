@@ -23,32 +23,28 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
-import ru.koalexse.aichallenge.data.ChatRepository
-import ru.koalexse.aichallenge.data.OpenAIApi
-import ru.koalexse.aichallenge.data.StatsTrackingLLMApi
+import ru.koalexse.aichallenge.di.AppContainer
+import ru.koalexse.aichallenge.ui.AgentChatViewModel
 import ru.koalexse.aichallenge.ui.ChatIntent
 import ru.koalexse.aichallenge.ui.ChatScreen
-import ru.koalexse.aichallenge.ui.ChatViewModel
-import ru.koalexse.aichallenge.ui.SettingsData
 import ru.koalexse.aichallenge.ui.state.ChatUiState
+import ru.koalexse.aichallenge.ui.state.SettingsData
 import ru.koalexse.aichallenge.ui.theme.AiChallengeTheme
 
 class MainActivity : ComponentActivity() {
-    // Ручной DI - создаем зависимости здесь
-    private val api by lazy {
-        StatsTrackingLLMApi(
-            OpenAIApi(
-                apiKey = BuildConfig.OPENAI_API_KEY,
-                url = BuildConfig.OPENAI_URL,
-            )
+
+    // DI модуль с lazy инициализацией
+    private val appModule by lazy {
+        AppContainer.initialize(
+            apiKey = BuildConfig.OPENAI_API_KEY,
+            baseUrl = BuildConfig.OPENAI_URL,
+            availableModels = BuildConfig.OPENAI_MODELS.split(",")
         )
     }
-    private val repository by lazy { ChatRepository(api) }
-    private val viewModel by lazy {
-        ChatViewModel(
-            repository,
-            availableModels = BuildConfig.OPENAI_MODELS.split(","),
-        )
+
+    // ViewModel на основе агента
+    private val viewModel: AgentChatViewModel by lazy {
+        appModule.createAgentChatViewModel()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

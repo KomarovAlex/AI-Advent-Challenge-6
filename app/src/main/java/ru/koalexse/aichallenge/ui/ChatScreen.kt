@@ -49,6 +49,7 @@ import ru.koalexse.aichallenge.R
 import ru.koalexse.aichallenge.domain.Message
 import ru.koalexse.aichallenge.domain.TokenStats
 import ru.koalexse.aichallenge.ui.state.ChatUiState
+import ru.koalexse.aichallenge.ui.state.SettingsData
 
 @OptIn(FlowPreview::class)
 @Composable
@@ -265,7 +266,7 @@ private fun MessageBubble(
                     text = text,
                     fontSize = 16.sp
                 )
-                
+
                 // Отображение статистики токенов и времени для сообщений ассистента
                 if (!isUser && tokenStats != null && !isLoading) {
                     Spacer(modifier = Modifier.height(8.dp))
