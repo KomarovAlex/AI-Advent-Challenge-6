@@ -3,6 +3,8 @@ package ru.koalexse.aichallenge.agent
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
+import ru.koalexse.aichallenge.agent.context.AgentContext
+import ru.koalexse.aichallenge.agent.context.SimpleAgentContext
 import ru.koalexse.aichallenge.data.StatsLLMApi
 import ru.koalexse.aichallenge.domain.ApiMessage
 import ru.koalexse.aichallenge.domain.ChatRequest
@@ -15,27 +17,30 @@ import java.net.SocketTimeoutException
  * 
  * Особенности:
  * - Поддерживает как стриминговый, так и полный режим ответа
- * - Автоматически управляет историей диалога
+ * - Автоматически управляет историей диалога через AgentContext
  * - Собирает статистику (время ответа, токены)
  * - Не зависит от Android фреймворка
  * 
  * @param api интерфейс для работы с LLM API
  * @param initialConfig начальная конфигурация агента
+ * @param agentContext контекст для управления историей (по умолчанию создаётся SimpleAgentContext)
  */
 class SimpleLLMAgent(
     private val api: StatsLLMApi,
-    initialConfig: AgentConfig
+    initialConfig: AgentConfig,
+    agentContext: AgentContext? = null
 ) : Agent {
 
-    // Мутабельное состояние агента (потокобезопасность обеспечивается synchronized)
     private var _config: AgentConfig = initialConfig
-    private val _conversationHistory: MutableList<AgentMessage> = mutableListOf()
+    private val _context: AgentContext = agentContext ?: SimpleAgentContext(
+        maxHistorySize = initialConfig.maxHistorySize
+    )
 
     override val config: AgentConfig
         get() = synchronized(this) { _config }
 
-    override val conversationHistory: List<AgentMessage>
-        get() = synchronized(this) { _conversationHistory.toList() }
+    override val context: AgentContext
+        get() = _context
 
     /**
      * Полный (не-стриминговый) режим общения с агентом
@@ -43,7 +48,7 @@ class SimpleLLMAgent(
      */
     override suspend fun chat(request: AgentRequest): AgentResponse {
         if (config.keepConversationHistory) {
-            addMessageToHistory(AgentMessage(Role.USER, request.userMessage))
+            _context.addUserMessage(request.userMessage)
         }
         validateRequest(request)
         val chatRequest = buildChatRequest(request)
@@ -69,7 +74,7 @@ class SimpleLLMAgent(
 
         // Сохраняем в историю, если включено
         if (config.keepConversationHistory) {
-            addMessageToHistory(AgentMessage(Role.ASSISTANT, responseContent))
+            _context.addAssistantMessage(responseContent)
         }
 
         return AgentResponse(
@@ -89,7 +94,7 @@ class SimpleLLMAgent(
      */
     override fun chatStream(request: AgentRequest): Flow<AgentStreamEvent> {
         if (config.keepConversationHistory) {
-            addMessageToHistory(AgentMessage(Role.USER, request.userMessage))
+            _context.addUserMessage(request.userMessage)
         }
         validateRequest(request)
 
@@ -108,12 +113,7 @@ class SimpleLLMAgent(
                         // Сохраняем в историю ДО эмиссии Completed
                         // чтобы подписчики получили актуальную историю
                         if (config.keepConversationHistory && responseBuilder.isNotEmpty()) {
-                            addMessageToHistory(
-                                AgentMessage(
-                                    Role.ASSISTANT,
-                                    responseBuilder.toString()
-                                )
-                            )
+                            _context.addAssistantMessage(responseBuilder.toString())
                         }
 
                         AgentStreamEvent.Completed(
@@ -135,7 +135,7 @@ class SimpleLLMAgent(
     override fun send(message: String): Flow<AgentStreamEvent> {
         val request = AgentRequest(
             userMessage = message,
-            conversationHistory = if (config.keepConversationHistory) conversationHistory else emptyList(),
+            conversationHistory = if (config.keepConversationHistory) _context.getHistory() else emptyList(),
             systemPrompt = config.defaultSystemPrompt,
             model = config.defaultModel,
             temperature = config.defaultTemperature,
@@ -145,19 +145,13 @@ class SimpleLLMAgent(
         return chatStream(request)
     }
 
-    override fun clearHistory() {
-        synchronized(this) {
-            _conversationHistory.clear()
-        }
-    }
-
-    override fun addToHistory(message: AgentMessage) {
-        addMessageToHistory(message)
-    }
-
     override fun updateConfig(newConfig: AgentConfig) {
         synchronized(this) {
             _config = newConfig
+            // Обновляем maxHistorySize в контексте, если он изменился
+            if (newConfig.maxHistorySize != _context.maxHistorySize) {
+                _context.updateMaxHistorySize(newConfig.maxHistorySize)
+            }
         }
     }
 
@@ -217,9 +211,9 @@ class SimpleLLMAgent(
             messages.add(msg.toApiMessage())
         }
 
-        // Если история в запросе пуста, но включено сохранение истории, используем внутреннюю
+        // Если история в запросе пуста, но включено сохранение истории, используем контекст
         if (request.conversationHistory.isEmpty() && config.keepConversationHistory) {
-            conversationHistory.forEach { msg ->
+            _context.getHistory().forEach { msg ->
                 messages.add(msg.toApiMessage())
             }
         }
@@ -228,22 +222,6 @@ class SimpleLLMAgent(
         messages.add(ApiMessage(role = "user", content = request.userMessage))
 
         return messages
-    }
-
-    /**
-     * Добавляет сообщение в историю с учётом лимита
-     */
-    private fun addMessageToHistory(message: AgentMessage) {
-        synchronized(this) {
-            _conversationHistory.add(message)
-
-            config.maxHistorySize?.let { maxHistorySize ->
-                // Обрезаем историю, если превышен лимит
-                while (config.maxHistorySize != null && _conversationHistory.size > maxHistorySize) {
-                    _conversationHistory.removeAt(0)
-                }
-            }
-        }
     }
 
     /**
