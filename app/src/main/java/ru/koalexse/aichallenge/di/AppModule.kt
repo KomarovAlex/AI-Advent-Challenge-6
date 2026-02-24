@@ -1,5 +1,6 @@
 package ru.koalexse.aichallenge.di
 
+import android.content.Context
 import ru.koalexse.aichallenge.agent.Agent
 import ru.koalexse.aichallenge.agent.AgentConfig
 import ru.koalexse.aichallenge.agent.AgentFactory
@@ -8,6 +9,8 @@ import ru.koalexse.aichallenge.data.LLMApi
 import ru.koalexse.aichallenge.data.OpenAIApi
 import ru.koalexse.aichallenge.data.StatsLLMApi
 import ru.koalexse.aichallenge.data.StatsTrackingLLMApi
+import ru.koalexse.aichallenge.data.persistence.ChatHistoryRepository
+import ru.koalexse.aichallenge.data.persistence.JsonChatHistoryRepository
 import ru.koalexse.aichallenge.ui.AgentChatViewModel
 
 /**
@@ -19,6 +22,7 @@ import ru.koalexse.aichallenge.ui.AgentChatViewModel
  * Использование:
  * ```
  * val appModule = AppModule(
+ *     context = applicationContext,
  *     apiKey = "your-api-key",
  *     baseUrl = "https://api.example.com/v1/chat/completions",
  *     availableModels = listOf("gpt-4", "gpt-3.5-turbo")
@@ -32,6 +36,7 @@ import ru.koalexse.aichallenge.ui.AgentChatViewModel
  * ```
  */
 class AppModule(
+    private val context: Context,
     private val apiKey: String,
     private val baseUrl: String,
     private val availableModels: List<String>,
@@ -74,14 +79,27 @@ class AppModule(
     val agent: Agent by lazy {
         AgentFactory.createAgentWithStats(statsLLMApi, agentConfig)
     }
+    
+    /**
+     * Репозиторий для хранения истории чата
+     */
+    val chatHistoryRepository: ChatHistoryRepository by lazy {
+        JsonChatHistoryRepository(context)
+    }
 
     // ==================== Фабричные методы ====================
 
     /**
      * Создаёт AgentChatViewModel (новая версия с Agent)
+     * 
+     * История чата автоматически сохраняется между запусками приложения.
      */
     fun createAgentChatViewModel(): AgentChatViewModel {
-        return AgentChatViewModel(agent, availableModels)
+        return AgentChatViewModel(
+            agent = agent,
+            availableModels = availableModels,
+            chatHistoryRepository = chatHistoryRepository
+        )
     }
 
     /**
@@ -122,7 +140,7 @@ class AppModule(
  * Использование:
  * ```
  * // В Application.onCreate():
- * AppContainer.initialize(apiKey, baseUrl, models)
+ * AppContainer.initialize(context, apiKey, baseUrl, models)
  * 
  * // В Activity/Fragment:
  * val viewModel = AppContainer.module.createAgentChatViewModel()
@@ -138,14 +156,21 @@ object AppContainer {
 
     /**
      * Инициализирует контейнер
+     * 
+     * @param context контекст приложения (рекомендуется applicationContext)
+     * @param apiKey API ключ
+     * @param baseUrl базовый URL API
+     * @param availableModels список доступных моделей
+     * @param defaultModel модель по умолчанию
      */
     fun initialize(
+        context: Context,
         apiKey: String,
         baseUrl: String,
         availableModels: List<String>,
         defaultModel: String = availableModels.firstOrNull() ?: "gpt-4"
     ): AppModule {
-        _module = AppModule(apiKey, baseUrl, availableModels, defaultModel)
+        _module = AppModule(context.applicationContext, apiKey, baseUrl, availableModels, defaultModel)
         return module
     }
 

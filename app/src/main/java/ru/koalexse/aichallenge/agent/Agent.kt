@@ -1,6 +1,7 @@
 package ru.koalexse.aichallenge.agent
 
 import kotlinx.coroutines.flow.Flow
+import ru.koalexse.aichallenge.agent.context.AgentContext
 
 /**
  * Базовый интерфейс агента для работы с LLM
@@ -19,9 +20,21 @@ interface Agent {
     val config: AgentConfig
     
     /**
+     * Контекст агента для управления историей диалога
+     * 
+     * Предоставляет полный доступ к истории сообщений и методам управления ею.
+     * Используйте context.getHistory() для получения истории,
+     * context.addMessage() для добавления и context.clear() для очистки.
+     */
+    val context: AgentContext
+    
+    /**
      * История диалога (если keepConversationHistory = true)
+     * 
+     * Удобный accessor для context.getHistory()
      */
     val conversationHistory: List<AgentMessage>
+        get() = context.getHistory()
     
     /**
      * Отправляет запрос и получает полный ответ (не-стриминговый режим)
@@ -57,16 +70,24 @@ interface Agent {
     
     /**
      * Очищает историю диалога
+     * 
+     * Удобный метод, эквивалентный context.clear()
      */
-    fun clearHistory()
+    fun clearHistory() {
+        context.clear()
+    }
     
     /**
      * Добавляет сообщение в историю вручную
      * Полезно для восстановления контекста или инъекции сообщений
      * 
+     * Удобный метод, эквивалентный context.addMessage(message)
+     * 
      * @param message сообщение для добавления
      */
-    fun addToHistory(message: AgentMessage)
+    fun addToHistory(message: AgentMessage) {
+        context.addMessage(message)
+    }
     
     /**
      * Обновляет конфигурацию агента
