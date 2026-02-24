@@ -36,6 +36,7 @@ class MainActivity : ComponentActivity() {
     // DI модуль с lazy инициализацией
     private val appModule by lazy {
         AppContainer.initialize(
+            context = applicationContext,
             apiKey = BuildConfig.OPENAI_API_KEY,
             baseUrl = BuildConfig.OPENAI_URL,
             availableModels = BuildConfig.OPENAI_MODELS.split(",")
