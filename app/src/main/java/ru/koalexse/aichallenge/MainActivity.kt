@@ -67,13 +67,19 @@ fun Content(state: State<ChatUiState>, handleIntent: (ChatIntent) -> Unit) {
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar({ Text(state.value.settingsData.model) }, actions = {
-                    IconButton(onClick = { handleIntent(ChatIntent.OpenSettings) }) {
+                    IconButton(
+                        onClick = { handleIntent(ChatIntent.OpenSettings) },
+                        enabled = !state.value.isLoading
+                    ) {
                         Icon(
                             imageVector = Icons.Default.Settings,
                             contentDescription = "Настройки"
                         )
                     }
-                    IconButton(onClick = { handleIntent(ChatIntent.ClearSession) }) {
+                    IconButton(
+                        onClick = { handleIntent(ChatIntent.ClearSession) },
+                        enabled = !state.value.isLoading
+                    ) {
                         Icon(
                             imageVector = Icons.Default.CleaningServices,
                             contentDescription = "Очистить"
