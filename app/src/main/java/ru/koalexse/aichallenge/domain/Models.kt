@@ -14,8 +14,30 @@ data class TokenStats(
     val promptTokens: Int,
     val completionTokens: Int,
     val totalTokens: Int,
-    val timeToFirstTokenMs: Long? = null
+    val timeToFirstTokenMs: Long? = null,
+    // Токены только истории (без текущего сообщения пользователя)
+    val historyTokens: Int? = null
 )
+
+/**
+ * Накопительная статистика токенов за сессию
+ */
+data class SessionTokenStats(
+    val totalPromptTokens: Int = 0,
+    val totalCompletionTokens: Int = 0,
+    val totalTokens: Int = 0,
+    val messageCount: Int = 0
+) {
+    /**
+     * Добавляет статистику от нового запроса
+     */
+    fun add(tokenStats: TokenStats): SessionTokenStats = SessionTokenStats(
+        totalPromptTokens = totalPromptTokens + tokenStats.promptTokens,
+        totalCompletionTokens = totalCompletionTokens + tokenStats.completionTokens,
+        totalTokens = totalTokens + tokenStats.totalTokens,
+        messageCount = messageCount + 1
+    )
+}
 
 data class ChatRequest(
     val messages: List<ApiMessage>,
