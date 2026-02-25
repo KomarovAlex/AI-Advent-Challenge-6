@@ -2,6 +2,7 @@ package ru.koalexse.aichallenge.ui.state
 
 import ru.koalexse.aichallenge.agent.AgentConfig
 import ru.koalexse.aichallenge.domain.Message
+import ru.koalexse.aichallenge.domain.SessionTokenStats
 
 data class ChatUiState(
     val messages: List<Message> = emptyList(),
@@ -11,6 +12,7 @@ data class ChatUiState(
     val isLoading: Boolean = false,
     val isSettingsOpen: Boolean = false,
     val error: String? = null,
+    val sessionStats: SessionTokenStats? = null
 )
 
 data class SettingsData(

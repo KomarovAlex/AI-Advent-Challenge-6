@@ -18,8 +18,10 @@ import ru.koalexse.aichallenge.agent.Role
 import ru.koalexse.aichallenge.agent.isUser
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toMessages
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toSession
+import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toSessionTokenStats
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryRepository
 import ru.koalexse.aichallenge.domain.Message
+import ru.koalexse.aichallenge.domain.SessionTokenStats
 import ru.koalexse.aichallenge.domain.TokenStats
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 import ru.koalexse.aichallenge.ui.state.SettingsData
@@ -66,7 +68,9 @@ class AgentChatViewModel(
         val lastMessageStats: TokenStats? = null,
         val lastMessageDuration: Long? = null,
         // Флаг загрузки истории
-        val isHistoryLoading: Boolean = true
+        val isHistoryLoading: Boolean = true,
+        // Накопительная статистика сессии
+        val sessionStats: SessionTokenStats = SessionTokenStats()
     )
 
     // ID текущей сессии
@@ -130,7 +134,8 @@ class AgentChatViewModel(
             currentInput = internal.currentInput,
             isLoading = internal.isLoading || internal.isHistoryLoading,
             isSettingsOpen = internal.isSettingsOpen,
-            error = internal.error
+            error = internal.error,
+            sessionStats = internal.sessionStats.takeIf { it.messageCount > 0 }
         )
     }
 
@@ -199,13 +204,14 @@ class AgentChatViewModel(
                 }
 
                 is AgentStreamEvent.Completed -> {
-                    // Сохраняем статистику в streaming message
+                    // Сохраняем статистику в streaming message и обновляем накопительную статистику
                     _internalState.update { state ->
                         state.copy(
                             streamingMessage = state.streamingMessage?.copy(
                                 tokenStats = event.tokenStats,
                                 responseDurationMs = event.durationMs
-                            )
+                            ),
+                            sessionStats = state.sessionStats.add(event.tokenStats)
                         )
                     }
                 }
@@ -283,6 +289,7 @@ class AgentChatViewModel(
                 lastMessageStats = null,
                 lastMessageDuration = null,
                 error = null,
+                sessionStats = SessionTokenStats() // Сбрасываем статистику
             )
         }
 
@@ -328,6 +335,14 @@ class AgentChatViewModel(
                         }
                     }
                 }
+                
+                // Восстанавливаем статистику сессии
+                val savedStats = session.toSessionTokenStats()
+                if (savedStats != null) {
+                    _internalState.update { state ->
+                        state.copy(sessionStats = savedStats)
+                    }
+                }
             }
         } catch (e: Exception) {
             // Логируем ошибку, но не показываем пользователю
@@ -347,10 +362,12 @@ class AgentChatViewModel(
         if (history.isEmpty()) return
 
         try {
+            val sessionStats = _internalState.value.sessionStats
             val session = history.toSession(
                 sessionId = currentSessionId,
                 model = agent.config.defaultModel,
-                createdAt = sessionCreatedAt
+                createdAt = sessionCreatedAt,
+                sessionStats = sessionStats.takeIf { it.messageCount > 0 }
             )
 
             chatHistoryRepository.saveSession(session)

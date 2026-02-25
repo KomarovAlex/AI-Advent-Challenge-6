@@ -20,6 +20,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -47,6 +48,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import ru.koalexse.aichallenge.R
 import ru.koalexse.aichallenge.domain.Message
+import ru.koalexse.aichallenge.domain.SessionTokenStats
 import ru.koalexse.aichallenge.domain.TokenStats
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 import ru.koalexse.aichallenge.ui.state.SettingsData
@@ -67,6 +69,7 @@ fun ChatScreen(
     val isLoading by remember { derivedStateOf { currentUiState.isLoading } }
     val currentInput by remember { derivedStateOf { currentUiState.currentInput } }
     val error by remember { derivedStateOf { currentUiState.error } }
+    val sessionStats by remember { derivedStateOf { currentUiState.sessionStats } }
 
     // Автоскролл при добавлении новых сообщений
     LaunchedEffect(messages.size) {
@@ -94,10 +97,8 @@ fun ChatScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(16.dp)
+            .padding(horizontal = 16.dp)
     ) {
-        Spacer(modifier = Modifier.height(16.dp))
-
         // Список сообщений
         MessageList(
             messages = messages,
@@ -105,13 +106,17 @@ fun ChatScreen(
             modifier = Modifier.weight(1f)
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
         // Индикатор загрузки
         if (isLoading) {
             LinearProgressIndicator(
                 modifier = Modifier.fillMaxWidth()
             )
         }
+
+        // Footer со статистикой сессии
+        SessionStatsFooter(sessionStats = sessionStats)
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         // Поле ввода сообщения
         InputRow(
@@ -124,6 +129,7 @@ fun ChatScreen(
                 }
             }
         )
+        Spacer(modifier = Modifier.height(16.dp))
     }
 
     // Ошибка
@@ -141,6 +147,33 @@ fun ChatScreen(
             onDismiss = { onIntent(ChatIntent.OpenSettings) }
         ) {
             currentOnIntent(ChatIntent.SaveSettings(it))
+        }
+    }
+}
+
+@Composable
+private fun SessionStatsFooter(
+    sessionStats: SessionTokenStats?,
+    modifier: Modifier = Modifier
+) {
+    if (sessionStats != null) {
+        Column(modifier = modifier.fillMaxWidth()) {
+            HorizontalDivider(
+                modifier = Modifier.padding(bottom = 4.dp),
+                color = MaterialTheme.colorScheme.outlineVariant
+            )
+            Text(
+                text = stringResource(
+                    R.string.session_stats_format,
+                    sessionStats.totalPromptTokens,
+                    sessionStats.totalCompletionTokens,
+                    sessionStats.totalTokens,
+                    sessionStats.messageCount
+                ),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 4.dp)
+            )
         }
     }
 }
@@ -299,17 +332,23 @@ fun ChatScreenPreview() {
                     Message(
                         "1",
                         true,
-                        "1"
+                        "Hello, how are you?"
                     ),
                     Message(
                         "2",
                         false,
-                        "2",
+                        "I'm doing great, thank you for asking!",
                         tokenStats = TokenStats(100, 50, 150, timeToFirstTokenMs = 350),
                         responseDurationMs = 2500L
                     )
                 ),
-                settingsData = SettingsData("deepseek-v3.2")
+                settingsData = SettingsData("deepseek-v3.2"),
+                sessionStats = SessionTokenStats(
+                    totalPromptTokens = 250,
+                    totalCompletionTokens = 120,
+                    totalTokens = 370,
+                    messageCount = 1
+                )
             )
         )
     }) { }
