@@ -46,7 +46,8 @@ data class ChatRequest(
     val max_tokens: Long? = null,
     val temperature: Float? = null,
     val stream: Boolean = false,
-    val stream_options: StreamOptions? = null
+    val stream_options: StreamOptions? = null,
+    val transforms: List<String>? = listOf(),
 )
 
 data class StreamOptions(
