@@ -82,7 +82,7 @@ interface Agent {
      * 
      * Удобный метод, эквивалентный context.clear()
      */
-    fun clearHistory() {
+    suspend fun clearHistory() {
         context.clear()
     }
     

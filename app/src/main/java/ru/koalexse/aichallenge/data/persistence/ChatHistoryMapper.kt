@@ -11,9 +11,6 @@ import java.util.UUID
  */
 object ChatHistoryMapper {
     
-    /**
-     * Конвертирует AgentMessage в PersistedAgentMessage
-     */
     fun AgentMessage.toPersisted(): PersistedAgentMessage {
         return PersistedAgentMessage(
             role = role.name,
@@ -22,9 +19,6 @@ object ChatHistoryMapper {
         )
     }
     
-    /**
-     * Конвертирует PersistedAgentMessage в AgentMessage
-     */
     fun PersistedAgentMessage.toAgentMessage(): AgentMessage {
         return AgentMessage(
             role = Role.valueOf(role),
@@ -33,9 +27,6 @@ object ChatHistoryMapper {
         )
     }
     
-    /**
-     * Конвертирует SessionTokenStats в PersistedSessionStats
-     */
     fun SessionTokenStats.toPersisted(): PersistedSessionStats {
         return PersistedSessionStats(
             totalPromptTokens = totalPromptTokens,
@@ -45,9 +36,6 @@ object ChatHistoryMapper {
         )
     }
     
-    /**
-     * Конвертирует PersistedSessionStats в SessionTokenStats
-     */
     fun PersistedSessionStats.toSessionTokenStats(): SessionTokenStats {
         return SessionTokenStats(
             totalPromptTokens = totalPromptTokens,
@@ -57,37 +45,22 @@ object ChatHistoryMapper {
         )
     }
     
-    /**
-     * Конвертирует ConversationSummary в PersistedSummary
-     */
     fun ConversationSummary.toPersisted(): PersistedSummary {
         return PersistedSummary(
             content = content,
-            originalMessageCount = originalMessageCount,
+            originalMessages = originalMessages.map { it.toPersisted() },
             createdAt = createdAt
         )
     }
     
-    /**
-     * Конвертирует PersistedSummary в ConversationSummary
-     */
     fun PersistedSummary.toConversationSummary(): ConversationSummary {
         return ConversationSummary(
             content = content,
-            originalMessageCount = originalMessageCount,
+            originalMessages = originalMessages.map { it.toAgentMessage() },
             createdAt = createdAt
         )
     }
     
-    /**
-     * Конвертирует список AgentMessage в ChatSession
-     * 
-     * @param sessionId ID сессии (если null, генерируется новый UUID)
-     * @param model название модели
-     * @param createdAt время создания (если null, используется время первого сообщения или текущее)
-     * @param sessionStats статистика токенов сессии
-     * @param summaries список summaries для компрессии истории
-     */
     fun List<AgentMessage>.toSession(
         sessionId: String? = null,
         model: String? = null,
@@ -107,51 +80,30 @@ object ChatHistoryMapper {
         )
     }
     
-    /**
-     * Конвертирует ChatSession в список AgentMessage
-     */
     fun ChatSession.toMessages(): List<AgentMessage> {
         return messages.map { it.toAgentMessage() }
     }
     
-    /**
-     * Извлекает статистику токенов из ChatSession
-     */
     fun ChatSession.toSessionTokenStats(): SessionTokenStats? {
         return sessionStats?.toSessionTokenStats()
     }
     
-    /**
-     * Извлекает summaries из ChatSession
-     */
     fun ChatSession.toSummaries(): List<ConversationSummary> {
         return summaries.map { it.toConversationSummary() }
     }
     
-    /**
-     * Конвертирует список PersistedAgentMessage в список AgentMessage
-     */
     fun List<PersistedAgentMessage>.toAgentMessages(): List<AgentMessage> {
         return map { it.toAgentMessage() }
     }
     
-    /**
-     * Конвертирует список AgentMessage в список PersistedAgentMessage
-     */
     fun List<AgentMessage>.toPersistedMessages(): List<PersistedAgentMessage> {
         return map { it.toPersisted() }
     }
     
-    /**
-     * Конвертирует список ConversationSummary в список PersistedSummary
-     */
     fun List<ConversationSummary>.toPersistedSummaries(): List<PersistedSummary> {
         return map { it.toPersisted() }
     }
     
-    /**
-     * Конвертирует список PersistedSummary в список ConversationSummary
-     */
     fun List<PersistedSummary>.toConversationSummaries(): List<ConversationSummary> {
         return map { it.toConversationSummary() }
     }

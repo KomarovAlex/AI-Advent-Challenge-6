@@ -7,7 +7,12 @@ data class Message(
     val text: String,
     val isLoading: Boolean = false,
     val tokenStats: TokenStats? = null,
-    val responseDurationMs: Long? = null
+    val responseDurationMs: Long? = null,
+    /**
+     * true — сообщение было сжато в summary и отображается только в UI,
+     * в запрос к LLM не отправляется
+     */
+    val isCompressed: Boolean = false
 )
 
 data class TokenStats(

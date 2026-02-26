@@ -181,6 +181,11 @@ class SimpleLLMAgent(
         }
     }
 
+    override suspend fun clearHistory() {
+        super.clearHistory()
+        (truncationStrategy as? SummaryTruncationStrategy)?.clearSummaries()
+    }
+
     override fun updateTruncationStrategy(strategy: ContextTruncationStrategy?) {
         synchronized(this) {
             _truncationStrategy = strategy
@@ -200,10 +205,10 @@ class SimpleLLMAgent(
     /**
      * Применяет стратегию обрезки к истории
      */
-    private suspend fun applyTruncation() {
-        val strategy = _truncationStrategy ?: return
+    private suspend fun applyTruncation(): Unit = withContext(Dispatchers.IO) {
+        val strategy = _truncationStrategy ?: return@withContext
         val history = _context.getHistory()
-        if (history.isEmpty()) return
+        if (history.isEmpty()) return@withContext
 
         val truncated = strategy.truncate(
             messages = history,
@@ -241,7 +246,7 @@ class SimpleLLMAgent(
     /**
      * Формирует ChatRequest из AgentRequest
      */
-    private fun buildChatRequest(request: AgentRequest): ChatRequest {
+    private suspend fun buildChatRequest(request: AgentRequest): ChatRequest {
         val messages = buildMessageList(request)
 
         return ChatRequest(
@@ -259,7 +264,7 @@ class SimpleLLMAgent(
      * Если используется SummaryTruncationStrategy, подставляет summaries
      * в начало истории как системные сообщения.
      */
-    private fun buildMessageList(request: AgentRequest): List<ApiMessage> {
+    private suspend fun buildMessageList(request: AgentRequest): List<ApiMessage> {
         val messages = mutableListOf<ApiMessage>()
 
         // Добавляем системный промпт, если есть
@@ -295,7 +300,7 @@ class SimpleLLMAgent(
     /**
      * Получает summary сообщения из стратегии, если она поддерживает компрессию
      */
-    private fun getSummaryMessages(): List<AgentMessage> {
+    private suspend fun getSummaryMessages(): List<AgentMessage> {
         val strategy = _truncationStrategy
         return if (strategy is SummaryTruncationStrategy) {
             strategy.getSummariesAsMessages()
