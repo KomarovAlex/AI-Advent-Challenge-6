@@ -4,7 +4,15 @@ import android.content.Context
 import ru.koalexse.aichallenge.agent.Agent
 import ru.koalexse.aichallenge.agent.AgentConfig
 import ru.koalexse.aichallenge.agent.AgentFactory
+import ru.koalexse.aichallenge.agent.SimpleLLMAgent
 import ru.koalexse.aichallenge.agent.buildAgent
+import ru.koalexse.aichallenge.agent.context.SimpleAgentContext
+import ru.koalexse.aichallenge.agent.context.strategy.SummaryTruncationStrategy
+import ru.koalexse.aichallenge.agent.context.summary.JsonSummaryStorage
+import ru.koalexse.aichallenge.agent.context.summary.LLMSummaryProvider
+import ru.koalexse.aichallenge.agent.context.summary.SimpleSummaryProvider
+import ru.koalexse.aichallenge.agent.context.summary.SummaryProvider
+import ru.koalexse.aichallenge.agent.context.summary.SummaryStorage
 import ru.koalexse.aichallenge.data.LLMApi
 import ru.koalexse.aichallenge.data.OpenAIApi
 import ru.koalexse.aichallenge.data.StatsLLMApi
@@ -28,11 +36,11 @@ import ru.koalexse.aichallenge.ui.AgentChatViewModel
  *     availableModels = listOf("gpt-4", "gpt-3.5-turbo")
  * )
  * 
- * // Вариант 1: Использование старого ChatRepository
- * val viewModel = appModule.createChatViewModel()
+ * // Вариант 1: Без компрессии (по умолчанию)
+ * val viewModel = appModule.createAgentChatViewModel()
  * 
- * // Вариант 2: Использование нового AgentChatViewModel
- * val agentViewModel = appModule.createAgentChatViewModel()
+ * // Вариант 2: С компрессией истории
+ * val viewModelWithCompression = appModule.createAgentChatViewModelWithCompression()
  * ```
  */
 class AppModule(
@@ -74,7 +82,7 @@ class AppModule(
     }
 
     /**
-     * Агент для работы с LLM
+     * Агент для работы с LLM (без компрессии)
      */
     val agent: Agent by lazy {
         AgentFactory.createAgentWithStats(statsLLMApi, agentConfig)
@@ -86,11 +94,18 @@ class AppModule(
     val chatHistoryRepository: ChatHistoryRepository by lazy {
         JsonChatHistoryRepository(context)
     }
+    
+    /**
+     * Хранилище для summaries (с автоматическим сохранением в JSON-файл)
+     */
+    val summaryStorage: JsonSummaryStorage by lazy {
+        JsonSummaryStorage(context)
+    }
 
     // ==================== Фабричные методы ====================
 
     /**
-     * Создаёт AgentChatViewModel (новая версия с Agent)
+     * Создаёт AgentChatViewModel (без компрессии)
      * 
      * История чата автоматически сохраняется между запусками приложения.
      */
@@ -99,6 +114,58 @@ class AppModule(
             agent = agent,
             availableModels = availableModels,
             chatHistoryRepository = chatHistoryRepository
+        )
+    }
+    
+    /**
+     * Создаёт AgentChatViewModel с компрессией истории
+     * 
+     * Последние N сообщений хранятся "как есть", старые сжимаются в summary.
+     * Это экономит токены при длинных диалогах.
+     * 
+     * @param keepRecentCount количество последних сообщений без сжатия (по умолчанию 10)
+     * @param summaryBlockSize минимальное количество сообщений для создания summary (по умолчанию 10)
+     * @param useLLMForSummary использовать LLM для генерации summary (true) или простой fallback (false)
+     * @param summaryModel модель для суммаризации (null = использовать основную модель)
+     */
+    fun createAgentChatViewModelWithCompression(
+        keepRecentCount: Int = 10,
+        summaryBlockSize: Int = 10,
+        useLLMForSummary: Boolean = true,
+        summaryModel: String? = null
+    ): AgentChatViewModel {
+        val storage: SummaryStorage = summaryStorage
+        
+        val summaryProvider: SummaryProvider = if (useLLMForSummary) {
+            LLMSummaryProvider(
+                api = statsLLMApi,
+                model = summaryModel ?: defaultModel
+            )
+        } else {
+            SimpleSummaryProvider()
+        }
+        
+        val truncationStrategy = SummaryTruncationStrategy(
+            summaryProvider = summaryProvider,
+            summaryStorage = storage,
+            keepRecentCount = keepRecentCount,
+            summaryBlockSize = summaryBlockSize
+        )
+        
+        val agentContext = SimpleAgentContext()
+        
+        val agentWithCompression = SimpleLLMAgent(
+            api = statsLLMApi,
+            initialConfig = agentConfig,
+            agentContext = agentContext,
+            truncationStrategy = truncationStrategy
+        )
+        
+        return AgentChatViewModel(
+            agent = agentWithCompression,
+            availableModels = availableModels,
+            chatHistoryRepository = chatHistoryRepository,
+            summaryStorage = storage
         )
     }
 
@@ -144,6 +211,9 @@ class AppModule(
  * 
  * // В Activity/Fragment:
  * val viewModel = AppContainer.module.createAgentChatViewModel()
+ * 
+ * // Или с компрессией:
+ * val viewModelWithCompression = AppContainer.module.createAgentChatViewModelWithCompression()
  * ```
  */
 object AppContainer {

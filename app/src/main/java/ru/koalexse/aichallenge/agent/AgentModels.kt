@@ -88,11 +88,12 @@ sealed class AgentStreamEvent {
  * 
  * @param defaultModel модель по умолчанию
  * @param defaultTemperature температура по умолчанию
- * @param defaultMaxTokens максимум токенов по умолчанию
+ * @param defaultMaxTokens максимум токенов в ответе по умолчанию
  * @param defaultSystemPrompt системный промпт по умолчанию
  * @param defaultStopSequences стоп-последовательности по умолчанию
  * @param keepConversationHistory сохранять ли историю диалога внутри агента
- * @param maxHistorySize максимальный размер истории (количество сообщений)
+ * @param maxHistorySize максимальный размер истории (количество сообщений, null = без ограничения)
+ * @param maxTokens максимальный размер истории в токенах (null = без ограничения)
  */
 data class AgentConfig(
     val defaultModel: String,
@@ -101,5 +102,6 @@ data class AgentConfig(
     val defaultSystemPrompt: String? = null,
     val defaultStopSequences: List<String>? = null,
     val keepConversationHistory: Boolean = true,
-    val maxHistorySize: Int? = null
+    val maxHistorySize: Int? = null,
+    val maxTokens: Int? = null
 )

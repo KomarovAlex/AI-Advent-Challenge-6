@@ -20,14 +20,20 @@ data class PersistedSessionStats(
 )
 
 /**
+ * Модель summary для сериализации в JSON
+ *
+ * @param content текст summary
+ * @param originalMessages оригинальные сообщения, из которых создано summary
+ * @param createdAt время создания summary
+ */
+data class PersistedSummary(
+    val content: String,
+    val originalMessages: List<PersistedAgentMessage> = emptyList(),
+    val createdAt: Long
+)
+
+/**
  * Модель сессии чата для сериализации
- * 
- * @param id уникальный идентификатор сессии
- * @param messages список сообщений
- * @param createdAt время создания сессии
- * @param updatedAt время последнего обновления
- * @param model модель, использованная в сессии
- * @param sessionStats накопительная статистика токенов за сессию
  */
 data class ChatSession(
     val id: String,
@@ -35,14 +41,15 @@ data class ChatSession(
     val createdAt: Long,
     val updatedAt: Long,
     val model: String? = null,
-    val sessionStats: PersistedSessionStats? = null
+    val sessionStats: PersistedSessionStats? = null,
+    val summaries: List<PersistedSummary> = emptyList()
 )
 
 /**
  * Контейнер для хранения всех сессий
  */
 data class ChatHistoryData(
-    val version: Int = 1,
+    val version: Int = 2,
     val sessions: List<ChatSession> = emptyList(),
     val activeSessionId: String? = null
 )

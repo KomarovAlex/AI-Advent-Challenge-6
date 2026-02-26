@@ -12,7 +12,12 @@ data class ChatUiState(
     val isLoading: Boolean = false,
     val isSettingsOpen: Boolean = false,
     val error: String? = null,
-    val sessionStats: SessionTokenStats? = null
+    val sessionStats: SessionTokenStats? = null,
+    /**
+     * Количество сообщений, сжатых в summaries
+     * Показывает, сколько сообщений было заменено на краткое описание
+     */
+    val compressedMessageCount: Int = 0
 )
 
 data class SettingsData(

@@ -2,6 +2,7 @@ package ru.koalexse.aichallenge.agent
 
 import kotlinx.coroutines.flow.Flow
 import ru.koalexse.aichallenge.agent.context.AgentContext
+import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
 
 /**
  * Базовый интерфейс агента для работы с LLM
@@ -27,6 +28,14 @@ interface Agent {
      * context.addMessage() для добавления и context.clear() для очистки.
      */
     val context: AgentContext
+    
+    /**
+     * Стратегия обрезки контекста (null = без обрезки)
+     * 
+     * Стратегия применяется агентом после добавления сообщений в историю.
+     * Позволяет ограничивать размер истории или сжимать старые сообщения.
+     */
+    val truncationStrategy: ContextTruncationStrategy?
     
     /**
      * История диалога (если keepConversationHistory = true)
@@ -57,7 +66,7 @@ interface Agent {
      * @param request запрос к агенту
      * @return поток событий стриминга
      */
-    fun chatStream(request: AgentRequest): Flow<AgentStreamEvent>
+    suspend fun chatStream(request: AgentRequest): Flow<AgentStreamEvent>
     
     /**
      * Упрощённый метод для быстрой отправки сообщения
@@ -66,14 +75,14 @@ interface Agent {
      * @param message текст сообщения пользователя
      * @return поток событий стриминга
      */
-    fun send(message: String): Flow<AgentStreamEvent>
+    suspend fun send(message: String): Flow<AgentStreamEvent>
     
     /**
      * Очищает историю диалога
      * 
      * Удобный метод, эквивалентный context.clear()
      */
-    fun clearHistory() {
+    suspend fun clearHistory() {
         context.clear()
     }
     
@@ -81,13 +90,11 @@ interface Agent {
      * Добавляет сообщение в историю вручную
      * Полезно для восстановления контекста или инъекции сообщений
      * 
-     * Удобный метод, эквивалентный context.addMessage(message)
+     * После добавления применяется стратегия обрезки, если она установлена.
      * 
      * @param message сообщение для добавления
      */
-    fun addToHistory(message: AgentMessage) {
-        context.addMessage(message)
-    }
+    suspend fun addToHistory(message: AgentMessage)
     
     /**
      * Обновляет конфигурацию агента
@@ -95,6 +102,13 @@ interface Agent {
      * @param newConfig новая конфигурация
      */
     fun updateConfig(newConfig: AgentConfig)
+    
+    /**
+     * Обновляет стратегию обрезки контекста
+     * 
+     * @param strategy новая стратегия (null = отключить обрезку)
+     */
+    fun updateTruncationStrategy(strategy: ContextTruncationStrategy?)
 }
 
 /**

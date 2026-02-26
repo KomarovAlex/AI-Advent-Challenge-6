@@ -2,34 +2,20 @@ package ru.koalexse.aichallenge.agent.context
 
 import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.Role
-import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
 
 /**
  * Интерфейс контекста агента для хранения и управления историей диалога
  * 
  * Контекст отвечает за:
  * - Хранение сообщений диалога
- * - Управление размером истории (ограничение количества сообщений и токенов)
  * - Предоставление истории в различных форматах
+ * 
+ * Стратегия обрезки и компрессии управляется агентом, а не контекстом,
+ * так как это часть бизнес-логики агента.
  * 
  * Реализации должны быть потокобезопасными.
  */
 interface AgentContext {
-    
-    /**
-     * Максимальный размер истории в сообщениях (null = без ограничений)
-     */
-    val maxHistorySize: Int?
-    
-    /**
-     * Максимальный размер истории в токенах (null = без ограничений)
-     */
-    val maxTokens: Int?
-    
-    /**
-     * Стратегия обрезки контекста
-     */
-    val truncationStrategy: ContextTruncationStrategy
     
     /**
      * Текущее количество сообщений в истории
@@ -76,9 +62,6 @@ interface AgentContext {
     
     /**
      * Добавляет сообщение в историю
-     * 
-     * Если установлены лимиты и история превышает их,
-     * будет применена стратегия обрезки.
      * 
      * @param message сообщение для добавления
      */
@@ -136,21 +119,11 @@ interface AgentContext {
     fun clear()
     
     /**
-     * Обновляет максимальный размер истории в сообщениях
+     * Заменяет историю на новый список сообщений
      * 
-     * Если новый размер меньше текущего количества сообщений,
-     * будет применена стратегия обрезки.
-     * 
-     * @param newMaxSize новый максимальный размер (null = без ограничений)
+     * @param messages новый список сообщений
      */
-    fun updateMaxHistorySize(newMaxSize: Int?)
-    
-    /**
-     * Обновляет максимальный размер истории в токенах
-     * 
-     * @param newMaxTokens новый максимальный размер в токенах (null = без ограничений)
-     */
-    fun updateMaxTokens(newMaxTokens: Int?)
+    fun replaceHistory(messages: List<AgentMessage>)
     
     /**
      * Создаёт копию контекста

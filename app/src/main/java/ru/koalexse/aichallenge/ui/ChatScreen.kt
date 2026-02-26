@@ -37,9 +37,11 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -64,21 +66,19 @@ fun ChatScreen(
     val currentOnIntent by rememberUpdatedState(onIntent)
     val currentUiState by rememberUpdatedState(uiState.value)
 
-    // Оптимизированное получение значений
     val messages by remember { derivedStateOf { currentUiState.messages } }
     val isLoading by remember { derivedStateOf { currentUiState.isLoading } }
     val currentInput by remember { derivedStateOf { currentUiState.currentInput } }
     val error by remember { derivedStateOf { currentUiState.error } }
     val sessionStats by remember { derivedStateOf { currentUiState.sessionStats } }
+    val compressedMessageCount by remember { derivedStateOf { currentUiState.compressedMessageCount } }
 
-    // Автоскролл при добавлении новых сообщений
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(0)
         }
     }
 
-    // Автоскролл при стриминге (обновление текста последнего сообщения)
     LaunchedEffect(Unit) {
         snapshotFlow {
             val lastMessage = uiState.value.messages.lastOrNull()
@@ -99,40 +99,32 @@ fun ChatScreen(
             .fillMaxSize()
             .padding(horizontal = 16.dp)
     ) {
-        // Список сообщений
         MessageList(
             messages = messages,
             listState = listState,
             modifier = Modifier.weight(1f)
         )
 
-        // Индикатор загрузки
         if (isLoading) {
-            LinearProgressIndicator(
-                modifier = Modifier.fillMaxWidth()
-            )
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
 
-        // Footer со статистикой сессии
-        SessionStatsFooter(sessionStats = sessionStats)
+        SessionStatsFooter(
+            sessionStats = sessionStats,
+            compressedMessageCount = compressedMessageCount
+        )
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Поле ввода сообщения
         InputRow(
             currentInput = currentInput,
             isLoading = isLoading,
             onInputChange = remember { { text: String -> currentOnIntent(ChatIntent.UpdateInput(text)) } },
-            onSendClick = remember {
-                {
-                    currentOnIntent(ChatIntent.SendMessage(uiState.value.currentInput))
-                }
-            }
+            onSendClick = remember { { currentOnIntent(ChatIntent.SendMessage(uiState.value.currentInput)) } }
         )
         Spacer(modifier = Modifier.height(16.dp))
     }
 
-    // Ошибка
     if (error != null) {
         ErrorDialog(
             error = error!!,
@@ -154,26 +146,39 @@ fun ChatScreen(
 @Composable
 private fun SessionStatsFooter(
     sessionStats: SessionTokenStats?,
+    compressedMessageCount: Int,
     modifier: Modifier = Modifier
 ) {
-    if (sessionStats != null) {
+    if (sessionStats != null || compressedMessageCount > 0) {
         Column(modifier = modifier.fillMaxWidth()) {
             HorizontalDivider(
                 modifier = Modifier.padding(bottom = 4.dp),
                 color = MaterialTheme.colorScheme.outlineVariant
             )
-            Text(
-                text = stringResource(
-                    R.string.session_stats_format,
-                    sessionStats.totalPromptTokens,
-                    sessionStats.totalCompletionTokens,
-                    sessionStats.totalTokens,
-                    sessionStats.messageCount
-                ),
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 4.dp)
-            )
+
+            if (sessionStats != null) {
+                Text(
+                    text = stringResource(
+                        R.string.session_stats_format,
+                        sessionStats.totalPromptTokens,
+                        sessionStats.totalCompletionTokens,
+                        sessionStats.totalTokens,
+                        sessionStats.messageCount
+                    ),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
+
+            if (compressedMessageCount > 0) {
+                Text(
+                    text = stringResource(R.string.compressed_stats_format, compressedMessageCount),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
         }
     }
 }
@@ -192,13 +197,20 @@ private fun MessageList(
         reverseLayout = true
     ) {
         items(messageList, key = { it.id }) { message ->
-            MessageBubble(
-                isUser = message.isUser,
-                text = message.text,
-                isLoading = message.isLoading,
-                tokenStats = message.tokenStats,
-                responseDurationMs = message.responseDurationMs
-            )
+            if (message.isCompressed) {
+                CompressedMessageBubble(
+                    isUser = message.isUser,
+                    text = message.text
+                )
+            } else {
+                MessageBubble(
+                    isUser = message.isUser,
+                    text = message.text,
+                    isLoading = message.isLoading,
+                    tokenStats = message.tokenStats,
+                    responseDurationMs = message.responseDurationMs
+                )
+            }
         }
     }
 }
@@ -235,10 +247,7 @@ private fun InputRow(
 }
 
 @Composable
-private fun ErrorDialog(
-    error: String,
-    onDismiss: () -> Unit
-) {
+private fun ErrorDialog(error: String, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.error_dialog_title)) },
@@ -251,6 +260,9 @@ private fun ErrorDialog(
     )
 }
 
+/**
+ * Пузырёк для обычного сообщения
+ */
 @Composable
 private fun MessageBubble(
     isUser: Boolean,
@@ -285,22 +297,14 @@ private fun MessageBubble(
                 modifier = Modifier
                     .padding(12.dp)
                     .combinedClickable(
-                        onClick = {
-                            // Можно добавить дополнительное действие при нажатии
-                        },
+                        onClick = {},
                         onLongClick = {
-                            if (!isLoading) {
-                                clipboardManager.setText(AnnotatedString(text))
-                            }
+                            if (!isLoading) clipboardManager.setText(AnnotatedString(text))
                         }
                     )
             ) {
-                Text(
-                    text = text,
-                    fontSize = 16.sp
-                )
+                Text(text = text, fontSize = 16.sp)
 
-                // Отображение статистики токенов и времени для сообщений ассистента
                 if (!isUser && tokenStats != null && !isLoading) {
                     Spacer(modifier = Modifier.height(8.dp))
                     val durationSeconds = (responseDurationMs ?: 0L) / 1000f
@@ -323,32 +327,70 @@ private fun MessageBubble(
     }
 }
 
+/**
+ * Пузырёк для сжатого сообщения — отображается с пометкой и приглушённо
+ */
+@Composable
+private fun CompressedMessageBubble(
+    isUser: Boolean,
+    text: String
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+    ) {
+        Card(
+            modifier = Modifier
+                .widthIn(max = 280.dp)
+                .padding(horizontal = 4.dp, vertical = 2.dp)
+                .alpha(0.5f),
+            shape = RoundedCornerShape(8.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isUser)
+                    MaterialTheme.colorScheme.primaryContainer
+                else
+                    MaterialTheme.colorScheme.secondaryContainer
+            )
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                // Метка "сжато"
+                Text(
+                    text = stringResource(R.string.compressed_message_label),
+                    fontSize = 10.sp,
+                    fontStyle = FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = text,
+                    fontSize = 14.sp,
+                    fontStyle = FontStyle.Italic,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+        }
+    }
+}
+
 @[Composable Preview]
 fun ChatScreenPreview() {
     ChatScreen(modifier = Modifier, remember {
         mutableStateOf(
             ChatUiState(
                 messages = listOf(
+                    Message("c1", true, "Старое сообщение 1", isCompressed = true),
+                    Message("c2", false, "Старый ответ ассистента", isCompressed = true),
+                    Message("1", true, "Hello, how are you?"),
                     Message(
-                        "1",
-                        true,
-                        "Hello, how are you?"
-                    ),
-                    Message(
-                        "2",
-                        false,
-                        "I'm doing great, thank you for asking!",
+                        "2", false,
+                        "I'm doing great, thank you!",
                         tokenStats = TokenStats(100, 50, 150, timeToFirstTokenMs = 350),
                         responseDurationMs = 2500L
                     )
                 ),
                 settingsData = SettingsData("deepseek-v3.2"),
-                sessionStats = SessionTokenStats(
-                    totalPromptTokens = 250,
-                    totalCompletionTokens = 120,
-                    totalTokens = 370,
-                    messageCount = 1
-                )
+                sessionStats = SessionTokenStats(250, 120, 370, 1),
+                compressedMessageCount = 2
             )
         )
     }) { }

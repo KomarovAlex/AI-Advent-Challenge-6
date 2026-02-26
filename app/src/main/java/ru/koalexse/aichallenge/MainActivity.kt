@@ -45,7 +45,7 @@ class MainActivity : ComponentActivity() {
 
     // ViewModel на основе агента
     private val viewModel: AgentChatViewModel by lazy {
-        appModule.createAgentChatViewModel()
+        appModule.createAgentChatViewModelWithCompression()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
