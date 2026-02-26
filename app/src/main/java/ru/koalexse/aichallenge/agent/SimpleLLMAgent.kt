@@ -1,10 +1,14 @@
 package ru.koalexse.aichallenge.agent
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import ru.koalexse.aichallenge.agent.context.AgentContext
 import ru.koalexse.aichallenge.agent.context.SimpleAgentContext
+import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
+import ru.koalexse.aichallenge.agent.context.strategy.SummaryTruncationStrategy
 import ru.koalexse.aichallenge.data.StatsLLMApi
 import ru.koalexse.aichallenge.domain.ApiMessage
 import ru.koalexse.aichallenge.domain.ChatRequest
@@ -18,23 +22,25 @@ import java.net.SocketTimeoutException
  * Особенности:
  * - Поддерживает как стриминговый, так и полный режим ответа
  * - Автоматически управляет историей диалога через AgentContext
+ * - Поддерживает компрессию истории через ContextTruncationStrategy
  * - Собирает статистику (время ответа, токены)
  * - Не зависит от Android фреймворка
  * 
  * @param api интерфейс для работы с LLM API
  * @param initialConfig начальная конфигурация агента
  * @param agentContext контекст для управления историей (по умолчанию создаётся SimpleAgentContext)
+ * @param truncationStrategy стратегия обрезки контекста (null = без обрезки)
  */
 class SimpleLLMAgent(
     private val api: StatsLLMApi,
     initialConfig: AgentConfig,
-    agentContext: AgentContext? = null
+    agentContext: AgentContext? = null,
+    truncationStrategy: ContextTruncationStrategy? = null
 ) : Agent {
 
     private var _config: AgentConfig = initialConfig
-    private val _context: AgentContext = agentContext ?: SimpleAgentContext(
-        maxHistorySize = initialConfig.maxHistorySize
-    )
+    private val _context: AgentContext = agentContext ?: SimpleAgentContext()
+    private var _truncationStrategy: ContextTruncationStrategy? = truncationStrategy
 
     override val config: AgentConfig
         get() = synchronized(this) { _config }
@@ -42,47 +48,62 @@ class SimpleLLMAgent(
     override val context: AgentContext
         get() = _context
 
+    override val truncationStrategy: ContextTruncationStrategy?
+        get() = synchronized(this) { _truncationStrategy }
+
     /**
      * Полный (не-стриминговый) режим общения с агентом
      * Собирает весь ответ и возвращает его целиком
      */
     override suspend fun chat(request: AgentRequest): AgentResponse {
-        if (config.keepConversationHistory) {
-            _context.addUserMessage(request.userMessage)
-        }
-        validateRequest(request)
-        val chatRequest = buildChatRequest(request)
-        val responseBuilder = StringBuilder()
-        var finalStats: TokenStats? = null
-        var finalDuration: Long? = null
+        return withContext(Dispatchers.IO) {
+            if (config.keepConversationHistory) {
+                addMessageWithTruncation(
+                    AgentMessage(
+                        role = Role.USER,
+                        content = request.userMessage
+                    )
+                )
+            }
+            validateRequest(request)
+            val chatRequest = buildChatRequest(request)
+            val responseBuilder = StringBuilder()
+            var finalStats: TokenStats? = null
+            var finalDuration: Long? = null
 
-        // Собираем все чанки в один ответ
-        api.sendMessageStream(chatRequest).collect { result ->
-            when (result) {
-                is StatsStreamResult.Content -> {
-                    responseBuilder.append(result.text)
-                }
+            // Собираем все чанки в один ответ
+            api.sendMessageStream(chatRequest).collect { result ->
+                when (result) {
+                    is StatsStreamResult.Content -> {
+                        responseBuilder.append(result.text)
+                    }
 
-                is StatsStreamResult.Stats -> {
-                    finalStats = result.tokenStats
-                    finalDuration = result.durationMs
+                    is StatsStreamResult.Stats -> {
+                        finalStats = result.tokenStats
+                        finalDuration = result.durationMs
+                    }
                 }
             }
+
+            val responseContent = responseBuilder.toString()
+
+            // Сохраняем в историю, если включено
+            if (config.keepConversationHistory) {
+                addMessageWithTruncation(
+                    AgentMessage(
+                        role = Role.ASSISTANT,
+                        content = responseContent
+                    )
+                )
+            }
+
+            return@withContext AgentResponse(
+                content = responseContent,
+                tokenStats = finalStats,
+                durationMs = finalDuration,
+                model = request.model
+            )
         }
-
-        val responseContent = responseBuilder.toString()
-
-        // Сохраняем в историю, если включено
-        if (config.keepConversationHistory) {
-            _context.addAssistantMessage(responseContent)
-        }
-
-        return AgentResponse(
-            content = responseContent,
-            tokenStats = finalStats,
-            durationMs = finalDuration,
-            model = request.model
-        )
     }
 
     /**
@@ -92,9 +113,9 @@ class SimpleLLMAgent(
      * Важно: сообщения добавляются в историю при получении Completed события,
      * чтобы подписчики могли сразу получить актуальную историю.
      */
-    override fun chatStream(request: AgentRequest): Flow<AgentStreamEvent> {
+    override suspend fun chatStream(request: AgentRequest): Flow<AgentStreamEvent> {
         if (config.keepConversationHistory) {
-            _context.addUserMessage(request.userMessage)
+            addMessageWithTruncation(AgentMessage(role = Role.USER, content = request.userMessage))
         }
         validateRequest(request)
 
@@ -113,7 +134,12 @@ class SimpleLLMAgent(
                         // Сохраняем в историю ДО эмиссии Completed
                         // чтобы подписчики получили актуальную историю
                         if (config.keepConversationHistory && responseBuilder.isNotEmpty()) {
-                            _context.addAssistantMessage(responseBuilder.toString())
+                            addMessageWithTruncation(
+                                AgentMessage(
+                                    role = Role.ASSISTANT,
+                                    content = responseBuilder.toString()
+                                )
+                            )
                         }
 
                         AgentStreamEvent.Completed(
@@ -132,7 +158,7 @@ class SimpleLLMAgent(
      * Упрощённый метод для быстрой отправки сообщения
      * Использует настройки по умолчанию из конфигурации
      */
-    override fun send(message: String): Flow<AgentStreamEvent> {
+    override suspend fun send(message: String): Flow<AgentStreamEvent> {
         val request = AgentRequest(
             userMessage = message,
             conversationHistory = if (config.keepConversationHistory) _context.getHistory() else emptyList(),
@@ -145,17 +171,50 @@ class SimpleLLMAgent(
         return chatStream(request)
     }
 
+    override suspend fun addToHistory(message: AgentMessage) {
+        addMessageWithTruncation(message)
+    }
+
     override fun updateConfig(newConfig: AgentConfig) {
         synchronized(this) {
             _config = newConfig
-            // Обновляем maxHistorySize в контексте, если он изменился
-            if (newConfig.maxHistorySize != _context.maxHistorySize) {
-                _context.updateMaxHistorySize(newConfig.maxHistorySize)
-            }
+        }
+    }
+
+    override fun updateTruncationStrategy(strategy: ContextTruncationStrategy?) {
+        synchronized(this) {
+            _truncationStrategy = strategy
         }
     }
 
     // ==================== Вспомогательные методы ====================
+
+    /**
+     * Добавляет сообщение в контекст и применяет стратегию обрезки
+     */
+    private suspend fun addMessageWithTruncation(message: AgentMessage) {
+        _context.addMessage(message)
+        applyTruncation()
+    }
+
+    /**
+     * Применяет стратегию обрезки к истории
+     */
+    private suspend fun applyTruncation() {
+        val strategy = _truncationStrategy ?: return
+        val history = _context.getHistory()
+        if (history.isEmpty()) return
+
+        val truncated = strategy.truncate(
+            messages = history,
+            maxTokens = config.maxTokens,
+            maxMessages = config.maxHistorySize
+        )
+
+        if (truncated.size != history.size) {
+            _context.replaceHistory(truncated)
+        }
+    }
 
     /**
      * Валидация запроса
@@ -196,6 +255,9 @@ class SimpleLLMAgent(
 
     /**
      * Формирует список сообщений для API
+     * 
+     * Если используется SummaryTruncationStrategy, подставляет summaries
+     * в начало истории как системные сообщения.
      */
     private fun buildMessageList(request: AgentRequest): List<ApiMessage> {
         val messages = mutableListOf<ApiMessage>()
@@ -204,6 +266,12 @@ class SimpleLLMAgent(
         val systemPrompt = request.systemPrompt ?: config.defaultSystemPrompt
         if (!systemPrompt.isNullOrBlank()) {
             messages.add(ApiMessage(role = "system", content = systemPrompt))
+        }
+
+        // Добавляем summaries, если стратегия поддерживает
+        val summaryMessages = getSummaryMessages()
+        summaryMessages.forEach { msg ->
+            messages.add(msg.toApiMessage())
         }
 
         // Добавляем историю из запроса
@@ -222,6 +290,18 @@ class SimpleLLMAgent(
         messages.add(ApiMessage(role = "user", content = request.userMessage))
 
         return messages
+    }
+
+    /**
+     * Получает summary сообщения из стратегии, если она поддерживает компрессию
+     */
+    private fun getSummaryMessages(): List<AgentMessage> {
+        val strategy = _truncationStrategy
+        return if (strategy is SummaryTruncationStrategy) {
+            strategy.getSummariesAsMessages()
+        } else {
+            emptyList()
+        }
     }
 
     /**

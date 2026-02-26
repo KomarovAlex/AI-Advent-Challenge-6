@@ -70,6 +70,7 @@ fun ChatScreen(
     val currentInput by remember { derivedStateOf { currentUiState.currentInput } }
     val error by remember { derivedStateOf { currentUiState.error } }
     val sessionStats by remember { derivedStateOf { currentUiState.sessionStats } }
+    val compressedMessageCount by remember { derivedStateOf { currentUiState.compressedMessageCount } }
 
     // Автоскролл при добавлении новых сообщений
     LaunchedEffect(messages.size) {
@@ -114,7 +115,10 @@ fun ChatScreen(
         }
 
         // Footer со статистикой сессии
-        SessionStatsFooter(sessionStats = sessionStats)
+        SessionStatsFooter(
+            sessionStats = sessionStats,
+            compressedMessageCount = compressedMessageCount
+        )
 
         Spacer(modifier = Modifier.height(8.dp))
 
@@ -154,26 +158,44 @@ fun ChatScreen(
 @Composable
 private fun SessionStatsFooter(
     sessionStats: SessionTokenStats?,
+    compressedMessageCount: Int,
     modifier: Modifier = Modifier
 ) {
-    if (sessionStats != null) {
+    if (sessionStats != null || compressedMessageCount > 0) {
         Column(modifier = modifier.fillMaxWidth()) {
             HorizontalDivider(
                 modifier = Modifier.padding(bottom = 4.dp),
                 color = MaterialTheme.colorScheme.outlineVariant
             )
-            Text(
-                text = stringResource(
-                    R.string.session_stats_format,
-                    sessionStats.totalPromptTokens,
-                    sessionStats.totalCompletionTokens,
-                    sessionStats.totalTokens,
-                    sessionStats.messageCount
-                ),
-                fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 4.dp)
-            )
+            
+            // Статистика сессии
+            if (sessionStats != null) {
+                Text(
+                    text = stringResource(
+                        R.string.session_stats_format,
+                        sessionStats.totalPromptTokens,
+                        sessionStats.totalCompletionTokens,
+                        sessionStats.totalTokens,
+                        sessionStats.messageCount
+                    ),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
+            
+            // Статистика компрессии
+            if (compressedMessageCount > 0) {
+                Text(
+                    text = stringResource(
+                        R.string.compressed_stats_format,
+                        compressedMessageCount
+                    ),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
         }
     }
 }
@@ -348,7 +370,8 @@ fun ChatScreenPreview() {
                     totalCompletionTokens = 120,
                     totalTokens = 370,
                     messageCount = 1
-                )
+                ),
+                compressedMessageCount = 20
             )
         )
     }) { }

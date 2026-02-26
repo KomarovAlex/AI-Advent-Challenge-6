@@ -1,6 +1,6 @@
 # 🏗️ Структура проекта aiChallenge
 
-> Android-приложение для чата с LLM (Large Language Model) с поддержкой стриминга ответов
+> Android-приложение для чата с LLM (Large Language Model) с поддержкой стриминга ответов и компрессии истории
 
 ## 📁 Дерево файлов
 
@@ -13,17 +13,24 @@ app/src/main/java/ru/koalexse/aichallenge/
 │   ├── AgentFactory.kt             # Фабрика и Builder для создания агентов
 │   ├── SimpleLLMAgent.kt           # Основная реализация агента
 │   └── context/                    # Управление контекстом диалога
-│       ├── AgentContext.kt         # Интерфейс контекста
+│       ├── AgentContext.kt         # Интерфейс контекста (простое хранилище)
 │       ├── SimpleAgentContext.kt   # Простая реализация контекста
-│       └── strategy/               # Стратегии обрезки контекста
-│           ├── ContextTruncationStrategy.kt
-│           ├── SimpleContextTruncationStrategy.kt
-│           └── PreserveSystemTruncationStrategy.kt
+│       ├── strategy/               # Стратегии обрезки контекста
+│       │   ├── ContextTruncationStrategy.kt      # Интерфейс (suspend)
+│       │   ├── SimpleContextTruncationStrategy.kt
+│       │   ├── PreserveSystemTruncationStrategy.kt
+│       │   └── SummaryTruncationStrategy.kt      # Компрессия через summary
+│       └── summary/                # Компрессия истории
+│           ├── SummaryModels.kt    # ConversationSummary
+│           ├── SummaryStorage.kt   # Интерфейс (suspend) + InMemorySummaryStorage
+│           ├── JsonSummaryStorage.kt # JSON-реализация с persistence
+│           ├── SummaryProvider.kt  # Интерфейс генерации summary
+│           └── LLMSummaryProvider.kt # Реализация через LLM
 ├── data/                           # 📡 Слой данных (API, persistence)
 │   ├── Api.kt                      # LLMApi интерфейс + OpenAIApi реализация
 │   ├── StatsTrackingLLMApi.kt      # Декоратор для сбора статистики
 │   └── persistence/                # Сохранение истории чата
-│       ├── ChatHistoryModels.kt    # Модели для сериализации
+│       ├── ChatHistoryModels.kt    # Модели для сериализации (+ summaries)
 │       ├── ChatHistoryMapper.kt    # Конвертеры между моделями
 │       ├── ChatHistoryRepository.kt # Интерфейс репозитория
 │       └── JsonChatHistoryRepository.kt # JSON-реализация
@@ -53,20 +60,24 @@ app/src/main/java/ru/koalexse/aichallenge/
 
 ```kotlin
 interface Agent {
-    val config: AgentConfig           // Конфигурация агента
-    val context: AgentContext         // Контекст диалога (история)
+    val config: AgentConfig                         // Конфигурация агента
+    val context: AgentContext                       // Контекст диалога (история)
+    val truncationStrategy: ContextTruncationStrategy?  // Стратегия обрезки
     val conversationHistory: List<AgentMessage>
     
     suspend fun chat(request: AgentRequest): AgentResponse    // Полный ответ
     fun chatStream(request: AgentRequest): Flow<AgentStreamEvent>  // Стриминг
     fun send(message: String): Flow<AgentStreamEvent>         // Упрощённый метод
     fun clearHistory()
-    fun addToHistory(message: AgentMessage)
+    suspend fun addToHistory(message: AgentMessage)
     fun updateConfig(newConfig: AgentConfig)
+    fun updateTruncationStrategy(strategy: ContextTruncationStrategy?)
 }
 ```
 
-**Реализация:** `SimpleLLMAgent` — использует `StatsLLMApi` для запросов.
+**Реализация:** `SimpleLLMAgent` — использует `StatsLLMApi` для запросов, применяет стратегию обрезки после каждого добавления сообщения.
+
+**Важно:** Стриминг реализован через `channelFlow` для избежания deadlock при collect + emit.
 
 ---
 
@@ -74,24 +85,125 @@ interface Agent {
 
 **Файл:** `agent/context/AgentContext.kt`
 
-Управляет историей сообщений с поддержкой:
-- Ограничения размера истории (`maxHistorySize`)
-- Стратегий обрезки (`ContextTruncationStrategy`)
+Простое хранилище сообщений. Стратегия обрезки вынесена в Agent.
 
 ```kotlin
 interface AgentContext {
+    val size: Int
+    val isEmpty: Boolean
+    
     fun getHistory(): List<AgentMessage>
     fun addMessage(message: AgentMessage)
     fun addUserMessage(content: String): AgentMessage
     fun addAssistantMessage(content: String): AgentMessage
+    fun addSystemMessage(content: String): AgentMessage
+    fun addMessages(messages: List<AgentMessage>)
+    fun removeLastMessage(): AgentMessage?
+    fun removeLastMessages(count: Int): List<AgentMessage>
     fun clear()
-    // ...
+    fun replaceHistory(messages: List<AgentMessage>)
+    fun copy(): AgentContext
 }
+```
+
+> **Изменение:** Контекст теперь не содержит логику обрезки — это просто потокобезопасное хранилище. Стратегия обрезки управляется агентом.
+
+---
+
+### 3. ContextTruncationStrategy (Стратегия обрезки)
+
+**Файл:** `agent/context/strategy/ContextTruncationStrategy.kt`
+
+```kotlin
+interface ContextTruncationStrategy {
+    suspend fun truncate(
+        messages: List<AgentMessage>,
+        maxTokens: Int?,
+        maxMessages: Int?
+    ): List<AgentMessage>
+}
+```
+
+Стратегия вызывается агентом после добавления каждого сообщения.
+
+---
+
+### 4. Компрессия истории (Summary)
+
+#### Принцип работы
+
+```
+История: [M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11, M12, M13, M14, M15]
+                                                        ↑
+                                                keepRecentCount = 5
+                                                summaryBlockSize = 10
+
+Результат в API запросе:
+  [System Prompt]
+  [Summary: "краткое описание M1..M10"]  ← Сжатые сообщения
+  [M11, M12, M13, M14, M15]              ← Последние N сообщений
+  [Новое сообщение пользователя]
+```
+
+#### Компоненты
+
+**SummaryTruncationStrategy** (`agent/context/strategy/SummaryTruncationStrategy.kt`)
+
+```kotlin
+class SummaryTruncationStrategy(
+    private val summaryProvider: SummaryProvider,
+    private val summaryStorage: SummaryStorage,
+    private val keepRecentCount: Int = 10,
+    private val summaryBlockSize: Int = 10
+) : ContextTruncationStrategy {
+    
+    override suspend fun truncate(...): List<AgentMessage>
+    
+    // Suspend версии (предпочтительно)
+    suspend fun getSummariesAsMessagesSuspend(): List<AgentMessage>
+    suspend fun clearSummariesSuspend()
+    suspend fun getCompressedMessageCountSuspend(): Int
+    
+    // Синхронные версии (для совместимости, используют runBlocking)
+    fun getSummariesAsMessages(): List<AgentMessage>
+    fun clearSummaries()
+    fun getCompressedMessageCount(): Int
+}
+```
+
+**SummaryStorage** (`agent/context/summary/SummaryStorage.kt`)
+
+```kotlin
+interface SummaryStorage {
+    suspend fun getSummaries(): List<ConversationSummary>
+    suspend fun addSummary(summary: ConversationSummary)
+    suspend fun clear()
+    suspend fun getSize(): Int
+    suspend fun isEmpty(): Boolean
+    suspend fun loadSummaries(summaries: List<ConversationSummary>)
+}
+
+// Реализации:
+class InMemorySummaryStorage : SummaryStorage      // В памяти (Mutex)
+class JsonSummaryStorage(context) : SummaryStorage // В JSON-файле (Mutex + Dispatchers.IO)
+```
+
+> **Важно:** Все методы `SummaryStorage` теперь `suspend` для корректной работы с IO и синхронизацией через `Mutex` вместо `synchronized`.
+
+**SummaryProvider** (`agent/context/summary/SummaryProvider.kt`)
+
+```kotlin
+interface SummaryProvider {
+    suspend fun summarize(messages: List<AgentMessage>): String
+}
+
+class LLMSummaryProvider(api: StatsLLMApi, model: String) : SummaryProvider
+class SimpleSummaryProvider : SummaryProvider  // Fallback без LLM
 ```
 
 ---
 
-### 3. Data Layer (Слой данных)
+### 5. Data Layer (Слой данных)
 
 #### LLMApi
 **Файл:** `data/Api.kt`
@@ -107,7 +219,7 @@ class OpenAIApi(apiKey: String, url: String) : LLMApi
 #### StatsLLMApi
 **Файл:** `data/StatsTrackingLLMApi.kt`
 
-Декоратор, добавляющий статистику (время до первого токена, общую длительность):
+Декоратор, добавляющий статистику:
 
 ```kotlin
 interface StatsLLMApi {
@@ -125,58 +237,24 @@ interface ChatHistoryRepository {
     suspend fun saveSession(session: ChatSession)
     suspend fun loadSession(sessionId: String): ChatSession?
     suspend fun loadActiveSession(): ChatSession?
-    suspend fun loadLatestSession(): ChatSession?
     suspend fun getAllSessions(): List<ChatSession>
     suspend fun clearAll()
 }
 ```
 
-**Реализация:** `JsonChatHistoryRepository` — хранит в JSON-файле.
-
 ---
 
-### 4. Domain Models (Доменные модели)
+### 6. Domain Models (Доменные модели)
 
 **Файл:** `domain/Models.kt`
 
 ```kotlin
-// UI модель сообщения
-data class Message(
-    val id: String,
-    val isUser: Boolean,
-    val text: String,
-    val isLoading: Boolean,
-    val tokenStats: TokenStats?,
-    val responseDurationMs: Long?
-)
-
-// Статистика токенов
-data class TokenStats(
-    val promptTokens: Int,
-    val completionTokens: Int,
-    val totalTokens: Int,
-    val timeToFirstTokenMs: Long?
-)
-
-// Запрос к API
-data class ChatRequest(
-    val messages: List<ApiMessage>,
-    val model: String,
-    val temperature: Float?,
-    val max_tokens: Long?,
-    val stream: Boolean
-)
-
-// Результаты стриминга
-sealed class StreamResult {
-    data class Content(val text: String) : StreamResult()
-    data class TokenUsage(val usage: Usage) : StreamResult()
-}
-
-sealed class StatsStreamResult {
-    data class Content(val text: String) : StatsStreamResult()
-    data class Stats(val tokenStats: TokenStats, val durationMs: Long) : StatsStreamResult()
-}
+data class Message(...)
+data class TokenStats(...)
+data class SessionTokenStats(...)
+data class ChatRequest(...)
+sealed class StreamResult { ... }
+sealed class StatsStreamResult { ... }
 ```
 
 **Файл:** `agent/AgentModels.kt`
@@ -193,11 +271,12 @@ data class AgentMessage(
 data class AgentConfig(
     val defaultModel: String,
     val defaultTemperature: Float?,
-    val defaultMaxTokens: Long?,
+    val defaultMaxTokens: Long?,       // Макс. токенов в ответе
     val defaultSystemPrompt: String?,
     val defaultStopSequences: List<String>?,
     val keepConversationHistory: Boolean,
-    val maxHistorySize: Int?
+    val maxHistorySize: Int?,          // Макс. сообщений в истории
+    val maxTokens: Int?                // Макс. токенов в контексте
 )
 
 sealed class AgentStreamEvent {
@@ -209,18 +288,17 @@ sealed class AgentStreamEvent {
 
 ---
 
-### 5. UI Layer (Слой UI)
+### 7. UI Layer (Слой UI)
 
 #### ViewModel
 **Файл:** `ui/AgentChatViewModel.kt`
-
-MVI-подход с `StateFlow`:
 
 ```kotlin
 class AgentChatViewModel(
     private val agent: Agent,
     private val availableModels: List<String>,
-    private val chatHistoryRepository: ChatHistoryRepository?
+    private val chatHistoryRepository: ChatHistoryRepository?,
+    private val summaryStorage: SummaryStorage?
 ) : ViewModel() {
     
     val state: StateFlow<ChatUiState>
@@ -238,30 +316,9 @@ sealed class ChatIntent {
 }
 ```
 
-#### UI State
-**Файл:** `ui/state/ChatUiState.kt`
-
-```kotlin
-data class ChatUiState(
-    val messages: List<Message>,
-    val availableModels: List<String>,
-    val settingsData: SettingsData,
-    val currentInput: String,
-    val isLoading: Boolean,
-    val isSettingsOpen: Boolean,
-    val error: String?
-)
-
-data class SettingsData(
-    val model: String,
-    val temperature: String?,
-    val tokens: String?
-)
-```
-
 ---
 
-### 6. Dependency Injection
+### 8. Dependency Injection
 
 **Файл:** `di/AppModule.kt`
 
@@ -274,14 +331,17 @@ class AppModule(
 ) {
     val llmApi: LLMApi by lazy { OpenAIApi(apiKey, baseUrl) }
     val statsLLMApi: StatsLLMApi by lazy { StatsTrackingLLMApi(llmApi) }
-    val agent: Agent by lazy { AgentFactory.createAgentWithStats(statsLLMApi, agentConfig) }
     val chatHistoryRepository: ChatHistoryRepository by lazy { JsonChatHistoryRepository(context) }
+    val summaryStorage: JsonSummaryStorage by lazy { JsonSummaryStorage(context) }
     
     fun createAgentChatViewModel(): AgentChatViewModel
-}
-
-object AppContainer {
-    fun initialize(context: Context, apiKey: String, baseUrl: String, availableModels: List<String>): AppModule
+    
+    fun createAgentChatViewModelWithCompression(
+        keepRecentCount: Int = 10,
+        summaryBlockSize: Int = 10,
+        useLLMForSummary: Boolean = true,
+        summaryModel: String? = null
+    ): AgentChatViewModel
 }
 ```
 
@@ -301,28 +361,95 @@ object AppContainer {
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                            Agent Layer                                   │
-│  ┌──────────────────┐    ┌─────────────────┐    ┌────────────────────┐ │
-│  │   SimpleLLMAgent │◀──▶│  AgentContext   │◀──▶│ TruncationStrategy │ │
-│  │  (Flow стриминг) │    │ (история чата)  │    │   (обрезка)        │ │
-│  └────────┬─────────┘    └─────────────────┘    └────────────────────┘ │
-└───────────┼─────────────────────────────────────────────────────────────┘
-            │
-            ▼
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │                        SimpleLLMAgent                              │ │
+│  │  ┌─────────────────┐    ┌────────────────────────────────────┐   │ │
+│  │  │  AgentContext   │    │      TruncationStrategy            │   │ │
+│  │  │ (хранилище msg) │    │ (SummaryTruncationStrategy и др.)  │   │ │
+│  │  └─────────────────┘    └──────────────┬─────────────────────┘   │ │
+│  │                                        │                          │ │
+│  │                         ┌──────────────┴──────────────┐          │ │
+│  │                         │     SummaryProvider         │          │ │
+│  │                         │  (LLMSummaryProvider)       │          │ │
+│  │                         └─────────────────────────────┘          │ │
+│  └───────────────────────────────────────────────────────────────────┘ │
+│                                    │                                    │
+└────────────────────────────────────┼────────────────────────────────────┘
+                                     │
+                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                            Data Layer                                    │
 │  ┌────────────────────┐    ┌──────────────┐    ┌─────────────────────┐ │
-│  │ StatsTrackingLLMApi│───▶│   OpenAIApi  │───▶│  HTTP (OkHttp)      │ │
-│  │   (декоратор)      │    │  (SSE stream)│    │                     │ │
+│  │ StatsTrackingLLMApi│───▶│   OpenAIApi  │───▶│  HTTP (OkHttp SSE)  │ │
 │  └────────────────────┘    └──────────────┘    └─────────────────────┘ │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │                    Persistence                                   │   │
-│  │  ┌─────────────────────┐    ┌──────────────────────────────┐   │   │
-│  │  │ChatHistoryRepository│◀──▶│ JsonChatHistoryRepository    │   │   │
-│  │  │    (interface)      │    │ (JSON файл в filesDir)       │   │   │
-│  │  └─────────────────────┘    └──────────────────────────────┘   │   │
+│  │  ┌─────────────────────────┐    ┌────────────────────────────┐  │   │
+│  │  │ ChatHistoryRepository   │    │ JsonChatHistoryRepository  │  │   │
+│  │  └─────────────────────────┘    └────────────────────────────┘  │   │
+│  │                                                                  │   │
+│  │  ┌─────────────────────────┐    ┌────────────────────────────┐  │   │
+│  │  │    SummaryStorage       │    │   JsonSummaryStorage       │  │   │
+│  │  │  (suspend interface)    │    │  (Mutex + Dispatchers.IO)  │  │   │
+│  │  └─────────────────────────┘    └────────────────────────────┘  │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🏛️ Архитектурные решения
+
+### Разделение ответственности
+
+| Компонент | Ответственность |
+|-----------|-----------------|
+| `AgentContext` | Простое хранилище сообщений (потокобезопасное) |
+| `Agent` | Бизнес-логика: отправка запросов, применение стратегии обрезки |
+| `TruncationStrategy` | Логика обрезки/компрессии истории |
+| `SummaryStorage` | Хранение summaries (IO операции) |
+
+### Потокобезопасность
+
+- **`AgentContext`** — использует `synchronized` для синхронных операций
+- **`SummaryStorage`** — использует `Mutex` для suspend-операций
+- **`SimpleLLMAgent.chatStream()`** — использует `channelFlow` для избежания deadlock
+
+### Почему `channelFlow` вместо `flow`?
+
+```kotlin
+// ❌ Может вызвать deadlock
+flow {
+    api.sendMessageStream(request).collect { result ->
+        emit(transform(result))  // emit внутри collect
+    }
+}
+
+// ✅ Безопасно
+channelFlow {
+    api.sendMessageStream(request).collect { result ->
+        send(transform(result))  // send внутри collect
+    }
+}
+```
+
+### Почему `Mutex` вместо `synchronized` в suspend-функциях?
+
+```kotlin
+// ❌ Блокирует поток, может вызвать проблемы
+suspend fun badExample() {
+    synchronized(lock) {
+        withContext(Dispatchers.IO) { ... }  // Поток заблокирован!
+    }
+}
+
+// ✅ Приостанавливает корутину, не блокирует поток
+suspend fun goodExample() {
+    mutex.withLock {
+        withContext(Dispatchers.IO) { ... }  // Корутина приостановлена
+    }
+}
 ```
 
 ---
@@ -365,8 +492,18 @@ class MainActivity : ComponentActivity() {
         )
     }
     
+    // Вариант 1: Без компрессии
     private val viewModel by lazy {
         appModule.createAgentChatViewModel()
+    }
+    
+    // Вариант 2: С компрессией истории
+    private val viewModelWithCompression by lazy {
+        appModule.createAgentChatViewModelWithCompression(
+            keepRecentCount = 10,
+            summaryBlockSize = 10,
+            useLLMForSummary = true
+        )
     }
 }
 ```
@@ -382,17 +519,43 @@ val agent = buildAgent {
     systemPrompt("You are a helpful assistant.")
     keepHistory(true)
     maxHistorySize(100)
+    truncationStrategy(myStrategy)  // Опционально
 }
 ```
 
-### 3. Отправка сообщения
+### 3. Создание агента с компрессией
+
+```kotlin
+val summaryStorage = JsonSummaryStorage(context)
+
+val summaryProvider = LLMSummaryProvider(
+    api = statsLLMApi,
+    model = "gpt-4"
+)
+
+val truncationStrategy = SummaryTruncationStrategy(
+    summaryProvider = summaryProvider,
+    summaryStorage = summaryStorage,
+    keepRecentCount = 10,
+    summaryBlockSize = 10
+)
+
+val agent = SimpleLLMAgent(
+    api = statsLLMApi,
+    initialConfig = agentConfig,
+    agentContext = SimpleAgentContext(),
+    truncationStrategy = truncationStrategy
+)
+```
+
+### 4. Отправка сообщения
 
 ```kotlin
 agent.send("Привет!")
     .collect { event ->
         when (event) {
             is AgentStreamEvent.ContentDelta -> print(event.text)
-            is AgentStreamEvent.Completed -> println("\nDone! Tokens: ${event.tokenStats}")
+            is AgentStreamEvent.Completed -> println("\nTokens: ${event.tokenStats}")
             is AgentStreamEvent.Error -> println("Error: ${event.exception}")
         }
     }
@@ -410,34 +573,35 @@ OPENAI_URL=https://api.openai.com/v1/chat/completions
 OPENAI_MODELS=gpt-4,gpt-3.5-turbo
 ```
 
-### Файл истории чата
+### Файлы данных
 
-Путь: `/data/data/ru.koalexse.aichallenge/files/chat_history.json`
+| Файл | Путь | Содержимое |
+|------|------|------------|
+| История чата | `files/chat_history.json` | Сессии, сообщения, статистика |
+| Summaries | `files/summaries.json` | Сжатые блоки сообщений |
 
-```json
-{
-  "version": 1,
-  "sessions": [
-    {
-      "id": "uuid",
-      "messages": [
-        {"role": "USER", "content": "Привет", "timestamp": 1234567890},
-        {"role": "ASSISTANT", "content": "Здравствуйте!", "timestamp": 1234567891}
-      ],
-      "createdAt": 1234567890,
-      "updatedAt": 1234567891,
-      "model": "gpt-4"
-    }
-  ],
-  "activeSessionId": "uuid"
-}
-```
+---
+
+## 🔧 Стратегии обрезки контекста
+
+| Стратегия | Описание | Когда использовать |
+|-----------|----------|-------------------|
+| `SimpleContextTruncationStrategy` | Удаляет старейшие сообщения | По умолчанию |
+| `PreserveSystemTruncationStrategy` | Сохраняет системные сообщения | Важен system prompt |
+| `SummaryTruncationStrategy` | Сжимает старые сообщения в summary | Длинные диалоги, экономия токенов |
+
+---
+
+## 💡 Экономия токенов с компрессией
+
+**Пример:**
+- 50 сообщений по ~100 токенов = 5000 токенов
+- С компрессией (keepRecent=10, summary ~200 токенов): 1000 + 200 = 1200 токенов
+- **Экономия: ~75%**
 
 ---
 
 ## 🧪 Тестирование
-
-Агент не зависит от Android и может тестироваться в изоляции:
 
 ```kotlin
 @Test
@@ -448,7 +612,53 @@ fun `agent should collect history`() = runTest {
     agent.send("Hello").collect()
     
     assertEquals(2, agent.conversationHistory.size)
-    assertEquals(Role.USER, agent.conversationHistory[0].role)
-    assertEquals(Role.ASSISTANT, agent.conversationHistory[1].role)
+}
+
+@Test
+fun `should compress old messages to summary`() = runTest {
+    val storage = InMemorySummaryStorage()
+    val strategy = SummaryTruncationStrategy(
+        summaryProvider = MockSummaryProvider("Summary"),
+        summaryStorage = storage,
+        keepRecentCount = 5,
+        summaryBlockSize = 10
+    )
+    
+    val agent = SimpleLLMAgent(
+        api = mockApi,
+        initialConfig = config,
+        truncationStrategy = strategy
+    )
+    
+    // Добавляем 15 сообщений
+    repeat(15) { agent.addToHistory(userMessage("Message $it")) }
+    
+    // Проверяем
+    assertEquals(1, storage.getSize())
+    assertEquals(5, agent.conversationHistory.size)
 }
 ```
+
+---
+
+## ⚠️ Важные особенности
+
+1. **Агент не зависит от Android** — можно тестировать без эмулятора
+
+2. **Стратегия обрезки в Agent, не в Context** — чёткое разделение: контекст хранит, агент управляет
+
+3. **Все методы SummaryStorage — suspend** — корректная работа с IO через Mutex
+
+4. **channelFlow для стриминга** — избежание deadlock при collect + emit
+
+5. **Конфигурация через BuildConfig** — API ключи в `local.properties`
+
+---
+
+## 🚫 Чего избегать
+
+- Не добавлять Android-зависимости в `agent/` слой
+- Не использовать `synchronized` в suspend-функциях — только `Mutex`
+- Не использовать `flow { collect { emit } }` — только `channelFlow` или `emitAll`
+- Не блокировать main thread — все IO на `Dispatchers.IO`
+- Не использовать `GlobalScope` — только `viewModelScope` или структурированные scope

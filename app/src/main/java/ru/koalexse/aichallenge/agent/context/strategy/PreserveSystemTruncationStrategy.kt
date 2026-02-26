@@ -19,7 +19,7 @@ class PreserveSystemTruncationStrategy(
     }
 ) : ContextTruncationStrategy {
     
-    override fun truncate(
+    override suspend fun truncate(
         messages: List<AgentMessage>,
         maxTokens: Int?,
         maxMessages: Int?

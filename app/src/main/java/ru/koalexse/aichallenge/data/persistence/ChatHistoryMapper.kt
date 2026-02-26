@@ -2,6 +2,7 @@ package ru.koalexse.aichallenge.data.persistence
 
 import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.Role
+import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
 import ru.koalexse.aichallenge.domain.SessionTokenStats
 import java.util.UUID
 
@@ -57,18 +58,42 @@ object ChatHistoryMapper {
     }
     
     /**
+     * Конвертирует ConversationSummary в PersistedSummary
+     */
+    fun ConversationSummary.toPersisted(): PersistedSummary {
+        return PersistedSummary(
+            content = content,
+            originalMessageCount = originalMessageCount,
+            createdAt = createdAt
+        )
+    }
+    
+    /**
+     * Конвертирует PersistedSummary в ConversationSummary
+     */
+    fun PersistedSummary.toConversationSummary(): ConversationSummary {
+        return ConversationSummary(
+            content = content,
+            originalMessageCount = originalMessageCount,
+            createdAt = createdAt
+        )
+    }
+    
+    /**
      * Конвертирует список AgentMessage в ChatSession
      * 
      * @param sessionId ID сессии (если null, генерируется новый UUID)
      * @param model название модели
      * @param createdAt время создания (если null, используется время первого сообщения или текущее)
      * @param sessionStats статистика токенов сессии
+     * @param summaries список summaries для компрессии истории
      */
     fun List<AgentMessage>.toSession(
         sessionId: String? = null,
         model: String? = null,
         createdAt: Long? = null,
-        sessionStats: SessionTokenStats? = null
+        sessionStats: SessionTokenStats? = null,
+        summaries: List<ConversationSummary> = emptyList()
     ): ChatSession {
         val now = System.currentTimeMillis()
         return ChatSession(
@@ -77,7 +102,8 @@ object ChatHistoryMapper {
             createdAt = createdAt ?: firstOrNull()?.timestamp ?: now,
             updatedAt = lastOrNull()?.timestamp ?: now,
             model = model,
-            sessionStats = sessionStats?.toPersisted()
+            sessionStats = sessionStats?.toPersisted(),
+            summaries = summaries.map { it.toPersisted() }
         )
     }
     
@@ -96,6 +122,13 @@ object ChatHistoryMapper {
     }
     
     /**
+     * Извлекает summaries из ChatSession
+     */
+    fun ChatSession.toSummaries(): List<ConversationSummary> {
+        return summaries.map { it.toConversationSummary() }
+    }
+    
+    /**
      * Конвертирует список PersistedAgentMessage в список AgentMessage
      */
     fun List<PersistedAgentMessage>.toAgentMessages(): List<AgentMessage> {
@@ -107,5 +140,19 @@ object ChatHistoryMapper {
      */
     fun List<AgentMessage>.toPersistedMessages(): List<PersistedAgentMessage> {
         return map { it.toPersisted() }
+    }
+    
+    /**
+     * Конвертирует список ConversationSummary в список PersistedSummary
+     */
+    fun List<ConversationSummary>.toPersistedSummaries(): List<PersistedSummary> {
+        return map { it.toPersisted() }
+    }
+    
+    /**
+     * Конвертирует список PersistedSummary в список ConversationSummary
+     */
+    fun List<PersistedSummary>.toConversationSummaries(): List<ConversationSummary> {
+        return map { it.toConversationSummary() }
     }
 }

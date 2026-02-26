@@ -16,7 +16,7 @@ interface ContextTruncationStrategy {
      * @param maxMessages максимальное количество сообщений (null = без ограничения)
      * @return обрезанный список сообщений
      */
-    fun truncate(
+    suspend fun truncate(
         messages: List<AgentMessage>,
         maxTokens: Int?,
         maxMessages: Int?

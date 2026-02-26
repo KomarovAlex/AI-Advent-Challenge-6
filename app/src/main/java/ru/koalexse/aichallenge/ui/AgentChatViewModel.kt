@@ -15,10 +15,13 @@ import ru.koalexse.aichallenge.agent.Agent
 import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.AgentStreamEvent
 import ru.koalexse.aichallenge.agent.Role
+import ru.koalexse.aichallenge.agent.context.strategy.SummaryTruncationStrategy
+import ru.koalexse.aichallenge.agent.context.summary.SummaryStorage
 import ru.koalexse.aichallenge.agent.isUser
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toMessages
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toSession
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toSessionTokenStats
+import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toSummaries
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryRepository
 import ru.koalexse.aichallenge.domain.Message
 import ru.koalexse.aichallenge.domain.SessionTokenStats
@@ -37,11 +40,13 @@ import java.util.UUID
  * @param agent агент для работы с LLM
  * @param availableModels список доступных моделей
  * @param chatHistoryRepository репозиторий для сохранения истории (опционально)
+ * @param summaryStorage хранилище для summaries (опционально, для компрессии)
  */
 class AgentChatViewModel(
     private val agent: Agent,
     private val availableModels: List<String>,
-    private val chatHistoryRepository: ChatHistoryRepository? = null
+    private val chatHistoryRepository: ChatHistoryRepository? = null,
+    private val summaryStorage: SummaryStorage? = null
 ) : ViewModel() {
 
     /**
@@ -70,7 +75,9 @@ class AgentChatViewModel(
         // Флаг загрузки истории
         val isHistoryLoading: Boolean = true,
         // Накопительная статистика сессии
-        val sessionStats: SessionTokenStats = SessionTokenStats()
+        val sessionStats: SessionTokenStats = SessionTokenStats(),
+        // Количество сжатых сообщений (для отображения)
+        val compressedMessageCount: Int = 0
     )
 
     // ID текущей сессии
@@ -135,7 +142,8 @@ class AgentChatViewModel(
             isLoading = internal.isLoading || internal.isHistoryLoading,
             isSettingsOpen = internal.isSettingsOpen,
             error = internal.error,
-            sessionStats = internal.sessionStats.takeIf { it.messageCount > 0 }
+            sessionStats = internal.sessionStats.takeIf { it.messageCount > 0 },
+            compressedMessageCount = internal.compressedMessageCount
         )
     }
 
@@ -211,7 +219,8 @@ class AgentChatViewModel(
                                 tokenStats = event.tokenStats,
                                 responseDurationMs = event.durationMs
                             ),
-                            sessionStats = state.sessionStats.add(event.tokenStats)
+                            sessionStats = state.sessionStats.add(event.tokenStats),
+                            compressedMessageCount = getCompressedMessageCount()
                         )
                     }
                 }
@@ -277,25 +286,48 @@ class AgentChatViewModel(
     }
 
     private fun clearSession() {
-        agent.clearHistory()
-        // Создаём новую сессию
-        currentSessionId = UUID.randomUUID().toString()
-        sessionCreatedAt = System.currentTimeMillis()
-
-        _internalState.update {
-            it.copy(
-                currentSessionId = currentSessionId,
-                streamingMessage = null,
-                lastMessageStats = null,
-                lastMessageDuration = null,
-                error = null,
-                sessionStats = SessionTokenStats() // Сбрасываем статистику
-            )
-        }
-
-        // Удаляем старую сессию из хранилища
         viewModelScope.launch {
+            agent.clearHistory()
+            summaryStorage?.clear()
+            
+            // Очищаем summaries в стратегии, если используется
+            val strategy = agent.truncationStrategy
+            if (strategy is SummaryTruncationStrategy) {
+                strategy.clearSummariesSuspend()
+            }
+            
+            // Создаём новую сессию
+            currentSessionId = UUID.randomUUID().toString()
+            sessionCreatedAt = System.currentTimeMillis()
+
+            _internalState.update {
+                it.copy(
+                    currentSessionId = currentSessionId,
+                    streamingMessage = null,
+                    lastMessageStats = null,
+                    lastMessageDuration = null,
+                    error = null,
+                    sessionStats = SessionTokenStats(),
+                    compressedMessageCount = 0
+                )
+            }
+
+            // Удаляем старую сессию из хранилища
             chatHistoryRepository?.clearAll()
+        }
+    }
+
+    // ==================== Вспомогательные методы ====================
+    
+    /**
+     * Получает количество сжатых сообщений из стратегии
+     */
+    private suspend fun getCompressedMessageCount(): Int {
+        val strategy = agent.truncationStrategy
+        return if (strategy is SummaryTruncationStrategy) {
+            strategy.getCompressedMessageCountSuspend()
+        } else {
+            0
         }
     }
 
@@ -318,6 +350,12 @@ class AgentChatViewModel(
                 currentSessionId = session.id
                 sessionCreatedAt = session.createdAt
 
+                // Загружаем summaries, если есть
+                val savedSummaries = session.toSummaries()
+                if (savedSummaries.isNotEmpty() && summaryStorage != null) {
+                    summaryStorage.loadSummaries(savedSummaries)
+                }
+                
                 // Загружаем сообщения в агента
                 val messages = session.toMessages()
                 messages.forEach { message ->
@@ -338,10 +376,13 @@ class AgentChatViewModel(
                 
                 // Восстанавливаем статистику сессии
                 val savedStats = session.toSessionTokenStats()
-                if (savedStats != null) {
-                    _internalState.update { state ->
-                        state.copy(sessionStats = savedStats)
-                    }
+                val compressedCount = savedSummaries.sumOf { it.originalMessageCount }
+                
+                _internalState.update { state ->
+                    state.copy(
+                        sessionStats = savedStats ?: SessionTokenStats(),
+                        compressedMessageCount = compressedCount
+                    )
                 }
             }
         } catch (e: Exception) {
@@ -363,11 +404,14 @@ class AgentChatViewModel(
 
         try {
             val sessionStats = _internalState.value.sessionStats
+            val summaries = summaryStorage?.getSummaries() ?: emptyList()
+            
             val session = history.toSession(
                 sessionId = currentSessionId,
                 model = agent.config.defaultModel,
                 createdAt = sessionCreatedAt,
-                sessionStats = sessionStats.takeIf { it.messageCount > 0 }
+                sessionStats = sessionStats.takeIf { it.messageCount > 0 },
+                summaries = summaries
             )
 
             chatHistoryRepository.saveSession(session)

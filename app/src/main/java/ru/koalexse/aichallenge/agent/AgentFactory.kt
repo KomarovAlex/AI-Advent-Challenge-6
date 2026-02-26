@@ -1,5 +1,6 @@
 package ru.koalexse.aichallenge.agent
 
+import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
 import ru.koalexse.aichallenge.data.OpenAIApi
 import ru.koalexse.aichallenge.data.StatsLLMApi
 import ru.koalexse.aichallenge.data.StatsTrackingLLMApi
@@ -17,13 +18,19 @@ object AgentFactory {
      * 
      * @param statsApi API с поддержкой статистики
      * @param config конфигурация агента
+     * @param truncationStrategy стратегия обрезки контекста (null = без обрезки)
      * @return настроенный агент
      */
     fun createAgentWithStats(
         statsApi: StatsLLMApi,
-        config: AgentConfig
+        config: AgentConfig,
+        truncationStrategy: ContextTruncationStrategy? = null
     ): Agent {
-        return SimpleLLMAgent(statsApi, config)
+        return SimpleLLMAgent(
+            api = statsApi, 
+            initialConfig = config,
+            truncationStrategy = truncationStrategy
+        )
     }
 }
 
@@ -42,6 +49,8 @@ class AgentBuilder {
     private var stopSequences: List<String>? = null
     private var keepHistory: Boolean = true
     private var maxHistorySize: Int? = null
+    private var maxContextTokens: Int? = null
+    private var truncationStrategy: ContextTruncationStrategy? = null
 
     /**
      * Устанавливает готовый API
@@ -68,7 +77,7 @@ class AgentBuilder {
     }
 
     /**
-     * Устанавливает максимальное количество токенов
+     * Устанавливает максимальное количество токенов в ответе
      */
     fun maxTokens(maxTokens: Long): AgentBuilder {
         this.maxTokens = maxTokens
@@ -100,10 +109,26 @@ class AgentBuilder {
     }
 
     /**
-     * Устанавливает максимальный размер истории
+     * Устанавливает максимальный размер истории (количество сообщений)
      */
     fun maxHistorySize(size: Int): AgentBuilder {
         this.maxHistorySize = size
+        return this
+    }
+    
+    /**
+     * Устанавливает максимальный размер контекста в токенах
+     */
+    fun maxContextTokens(tokens: Int): AgentBuilder {
+        this.maxContextTokens = tokens
+        return this
+    }
+    
+    /**
+     * Устанавливает стратегию обрезки контекста
+     */
+    fun truncationStrategy(strategy: ContextTruncationStrategy): AgentBuilder {
+        this.truncationStrategy = strategy
         return this
     }
 
@@ -125,10 +150,15 @@ class AgentBuilder {
             defaultSystemPrompt = systemPrompt,
             defaultStopSequences = stopSequences,
             keepConversationHistory = keepHistory,
-            maxHistorySize = maxHistorySize
+            maxHistorySize = maxHistorySize,
+            maxTokens = maxContextTokens
         )
 
-        return SimpleLLMAgent(statsApi, config)
+        return SimpleLLMAgent(
+            api = statsApi, 
+            initialConfig = config,
+            truncationStrategy = truncationStrategy
+        )
     }
 }
 
@@ -138,10 +168,11 @@ class AgentBuilder {
  * Пример использования:
  * ```
  * val agent = buildAgent {
- *     withOpenAI("sk-xxx", "https://api.example.com/v1/chat/completions")
+ *     withApi(statsApi)
  *     model("gpt-4")
  *     temperature(0.7f)
  *     systemPrompt("You are a helpful assistant.")
+ *     truncationStrategy(myStrategy)
  * }
  * ```
  */
