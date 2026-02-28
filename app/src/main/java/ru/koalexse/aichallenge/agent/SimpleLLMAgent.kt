@@ -9,7 +9,7 @@ import ru.koalexse.aichallenge.agent.context.AgentContext
 import ru.koalexse.aichallenge.agent.context.SimpleAgentContext
 import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.SummaryTruncationStrategy
-import ru.koalexse.aichallenge.data.StatsLLMApi
+import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
 import ru.koalexse.aichallenge.domain.ApiMessage
 import ru.koalexse.aichallenge.domain.ChatRequest
 import ru.koalexse.aichallenge.domain.StatsStreamResult
@@ -17,18 +17,18 @@ import ru.koalexse.aichallenge.domain.TokenStats
 import java.net.SocketTimeoutException
 
 /**
- * Простая реализация агента для работы с LLM через StatsLLMApi
- * 
+ * Простая реализация агента для работы с LLM через [StatsLLMApi]
+ *
  * Особенности:
  * - Поддерживает как стриминговый, так и полный режим ответа
- * - Автоматически управляет историей диалога через AgentContext
- * - Поддерживает компрессию истории через ContextTruncationStrategy
+ * - Инкапсулирует историю и summaries — снаружи только read-only доступ
+ * - Поддерживает компрессию истории через [ContextTruncationStrategy]
  * - Собирает статистику (время ответа, токены)
  * - Не зависит от Android фреймворка
- * 
+ *
  * @param api интерфейс для работы с LLM API
  * @param initialConfig начальная конфигурация агента
- * @param agentContext контекст для управления историей (по умолчанию создаётся SimpleAgentContext)
+ * @param agentContext контекст для управления историей (по умолчанию [SimpleAgentContext])
  * @param truncationStrategy стратегия обрезки контекста (null = без обрезки)
  */
 class SimpleLLMAgent(
@@ -45,39 +45,58 @@ class SimpleLLMAgent(
     override val config: AgentConfig
         get() = synchronized(this) { _config }
 
-    override val context: AgentContext
-        get() = _context
-
     override val truncationStrategy: ContextTruncationStrategy?
         get() = synchronized(this) { _truncationStrategy }
 
+    override val conversationHistory: List<AgentMessage>
+        get() = _context.getHistory()
+
+    // ==================== Summaries ====================
+
     /**
-     * Полный (не-стриминговый) режим общения с агентом
-     * Собирает весь ответ и возвращает его целиком
+     * Возвращает список сжатых summaries.
+     * Если стратегия компрессии не установлена — пустой список.
+     */
+    override suspend fun getSummaries(): List<ConversationSummary> {
+        val strategy = synchronized(this) { _truncationStrategy }
+        return if (strategy is SummaryTruncationStrategy) {
+            strategy.getSummaries()
+        } else {
+            emptyList()
+        }
+    }
+
+    /**
+     * Загружает summaries при восстановлении сессии.
+     * Если стратегия компрессии не установлена — игнорирует.
+     */
+    override suspend fun loadSummaries(summaries: List<ConversationSummary>) {
+        val strategy = synchronized(this) { _truncationStrategy }
+        if (strategy is SummaryTruncationStrategy) {
+            strategy.loadSummaries(summaries)
+        }
+    }
+
+    // ==================== Публичные методы ====================
+
+    /**
+     * Полный (не-стриминговый) режим общения с агентом.
      */
     override suspend fun chat(request: AgentRequest): AgentResponse {
         return withContext(Dispatchers.IO) {
             if (config.keepConversationHistory) {
-                addMessageWithTruncation(
-                    AgentMessage(
-                        role = Role.USER,
-                        content = request.userMessage
-                    )
-                )
+                addMessageWithTruncation(AgentMessage(role = Role.USER, content = request.userMessage))
             }
             validateRequest(request)
+
             val chatRequest = buildChatRequest(request)
             val responseBuilder = StringBuilder()
             var finalStats: TokenStats? = null
             var finalDuration: Long? = null
 
-            // Собираем все чанки в один ответ
             api.sendMessageStream(chatRequest).collect { result ->
                 when (result) {
-                    is StatsStreamResult.Content -> {
-                        responseBuilder.append(result.text)
-                    }
-
+                    is StatsStreamResult.Content -> responseBuilder.append(result.text)
                     is StatsStreamResult.Stats -> {
                         finalStats = result.tokenStats
                         finalDuration = result.durationMs
@@ -87,17 +106,11 @@ class SimpleLLMAgent(
 
             val responseContent = responseBuilder.toString()
 
-            // Сохраняем в историю, если включено
             if (config.keepConversationHistory) {
-                addMessageWithTruncation(
-                    AgentMessage(
-                        role = Role.ASSISTANT,
-                        content = responseContent
-                    )
-                )
+                addMessageWithTruncation(AgentMessage(role = Role.ASSISTANT, content = responseContent))
             }
 
-            return@withContext AgentResponse(
+            AgentResponse(
                 content = responseContent,
                 tokenStats = finalStats,
                 durationMs = finalDuration,
@@ -107,11 +120,10 @@ class SimpleLLMAgent(
     }
 
     /**
-     * Стриминговый режим общения с агентом
-     * Возвращает Flow с событиями по мере их поступления
-     * 
-     * Важно: сообщения добавляются в историю при получении Completed события,
-     * чтобы подписчики могли сразу получить актуальную историю.
+     * Стриминговый режим общения с агентом.
+     *
+     * Сообщения добавляются в историю при получении [AgentStreamEvent.Completed],
+     * чтобы подписчики сразу получили актуальную историю.
      */
     override suspend fun chatStream(request: AgentRequest): Flow<AgentStreamEvent> {
         if (config.keepConversationHistory) {
@@ -129,19 +141,12 @@ class SimpleLLMAgent(
                         responseBuilder.append(result.text)
                         AgentStreamEvent.ContentDelta(result.text)
                     }
-
                     is StatsStreamResult.Stats -> {
-                        // Сохраняем в историю ДО эмиссии Completed
-                        // чтобы подписчики получили актуальную историю
                         if (config.keepConversationHistory && responseBuilder.isNotEmpty()) {
                             addMessageWithTruncation(
-                                AgentMessage(
-                                    role = Role.ASSISTANT,
-                                    content = responseBuilder.toString()
-                                )
+                                AgentMessage(role = Role.ASSISTANT, content = responseBuilder.toString())
                             )
                         }
-
                         AgentStreamEvent.Completed(
                             tokenStats = result.tokenStats,
                             durationMs = result.durationMs
@@ -149,19 +154,15 @@ class SimpleLLMAgent(
                     }
                 }
             }
-            .catch { e ->
-                emit(AgentStreamEvent.Error(wrapException(e)))
-            }
+            .catch { e -> emit(AgentStreamEvent.Error(wrapException(e))) }
     }
 
     /**
-     * Упрощённый метод для быстрой отправки сообщения
-     * Использует настройки по умолчанию из конфигурации
+     * Упрощённый метод для быстрой отправки сообщения.
      */
     override suspend fun send(message: String): Flow<AgentStreamEvent> {
         val request = AgentRequest(
             userMessage = message,
-            conversationHistory = if (config.keepConversationHistory) _context.getHistory() else emptyList(),
             systemPrompt = config.defaultSystemPrompt,
             model = config.defaultModel,
             temperature = config.defaultTemperature,
@@ -171,42 +172,35 @@ class SimpleLLMAgent(
         return chatStream(request)
     }
 
+    override suspend fun clearHistory() {
+        _context.clear()
+        val strategy = synchronized(this) { _truncationStrategy }
+        if (strategy is SummaryTruncationStrategy) {
+            strategy.clearSummaries()
+        }
+    }
+
     override suspend fun addToHistory(message: AgentMessage) {
         addMessageWithTruncation(message)
     }
 
     override fun updateConfig(newConfig: AgentConfig) {
-        synchronized(this) {
-            _config = newConfig
-        }
-    }
-
-    override suspend fun clearHistory() {
-        super.clearHistory()
-        (truncationStrategy as? SummaryTruncationStrategy)?.clearSummaries()
+        synchronized(this) { _config = newConfig }
     }
 
     override fun updateTruncationStrategy(strategy: ContextTruncationStrategy?) {
-        synchronized(this) {
-            _truncationStrategy = strategy
-        }
+        synchronized(this) { _truncationStrategy = strategy }
     }
 
-    // ==================== Вспомогательные методы ====================
+    // ==================== Приватные методы ====================
 
-    /**
-     * Добавляет сообщение в контекст и применяет стратегию обрезки
-     */
     private suspend fun addMessageWithTruncation(message: AgentMessage) {
         _context.addMessage(message)
         applyTruncation()
     }
 
-    /**
-     * Применяет стратегию обрезки к истории
-     */
     private suspend fun applyTruncation(): Unit = withContext(Dispatchers.IO) {
-        val strategy = _truncationStrategy ?: return@withContext
+        val strategy = synchronized(this@SimpleLLMAgent) { _truncationStrategy } ?: return@withContext
         val history = _context.getHistory()
         if (history.isEmpty()) return@withContext
 
@@ -221,9 +215,6 @@ class SimpleLLMAgent(
         }
     }
 
-    /**
-     * Валидация запроса
-     */
     private fun validateRequest(request: AgentRequest) {
         if (request.userMessage.isBlank()) {
             throw AgentException.ValidationError("User message cannot be blank")
@@ -243,14 +234,9 @@ class SimpleLLMAgent(
         }
     }
 
-    /**
-     * Формирует ChatRequest из AgentRequest
-     */
     private suspend fun buildChatRequest(request: AgentRequest): ChatRequest {
-        val messages = buildMessageList(request)
-
         return ChatRequest(
-            messages = messages,
+            messages = buildMessageList(request),
             model = request.model,
             temperature = request.temperature,
             max_tokens = request.maxTokens,
@@ -259,49 +245,35 @@ class SimpleLLMAgent(
     }
 
     /**
-     * Формирует список сообщений для API
-     * 
-     * Если используется SummaryTruncationStrategy, подставляет summaries
-     * в начало истории как системные сообщения.
+     * Формирует список сообщений для API.
+     *
+     * Структура:
+     * 1. System prompt (если есть)
+     * 2. Summary-сообщения (только content, не originalMessages)
+     * 3a. keepConversationHistory=true  → _context.getHistory() (уже включает userMessage)
+     * 3b. keepConversationHistory=false → только текущий userMessage
      */
     private suspend fun buildMessageList(request: AgentRequest): List<ApiMessage> {
         val messages = mutableListOf<ApiMessage>()
 
-        // Добавляем системный промпт, если есть
         val systemPrompt = request.systemPrompt ?: config.defaultSystemPrompt
         if (!systemPrompt.isNullOrBlank()) {
             messages.add(ApiMessage(role = "system", content = systemPrompt))
         }
 
-        // Добавляем summaries, если стратегия поддерживает
-        val summaryMessages = getSummaryMessages()
-        summaryMessages.forEach { msg ->
-            messages.add(msg.toApiMessage())
-        }
+        getSummaryMessages().forEach { msg -> messages.add(msg.toApiMessage()) }
 
-        // Добавляем историю из запроса
-        request.conversationHistory.forEach { msg ->
-            messages.add(msg.toApiMessage())
+        if (config.keepConversationHistory) {
+            _context.getHistory().forEach { msg -> messages.add(msg.toApiMessage()) }
+        } else {
+            messages.add(ApiMessage(role = "user", content = request.userMessage))
         }
-
-        // Если история в запросе пуста, но включено сохранение истории, используем контекст
-        if (request.conversationHistory.isEmpty() && config.keepConversationHistory) {
-            _context.getHistory().forEach { msg ->
-                messages.add(msg.toApiMessage())
-            }
-        }
-
-        // Добавляем текущее сообщение пользователя
-        messages.add(ApiMessage(role = "user", content = request.userMessage))
 
         return messages
     }
 
-    /**
-     * Получает summary сообщения из стратегии, если она поддерживает компрессию
-     */
     private suspend fun getSummaryMessages(): List<AgentMessage> {
-        val strategy = _truncationStrategy
+        val strategy = synchronized(this) { _truncationStrategy }
         return if (strategy is SummaryTruncationStrategy) {
             strategy.getSummariesAsMessages()
         } else {
@@ -309,27 +281,12 @@ class SimpleLLMAgent(
         }
     }
 
-    /**
-     * Оборачивает исключения в AgentException
-     */
-    private fun wrapException(e: Throwable): AgentException {
-        return when (e) {
-            is AgentException -> e
-            is SocketTimeoutException -> AgentException.TimeoutError(
-                "Request timed out: ${e.message}",
-                e
-            )
-
-            else -> AgentException.ApiError(
-                message = e.message ?: "Unknown error",
-                cause = e
-            )
-        }
+    private fun wrapException(e: Throwable): AgentException = when (e) {
+        is AgentException -> e
+        is SocketTimeoutException -> AgentException.TimeoutError("Request timed out: ${e.message}", e)
+        else -> AgentException.ApiError(message = e.message ?: "Unknown error", cause = e)
     }
 
-    /**
-     * Конвертирует AgentMessage в ApiMessage
-     */
     private fun AgentMessage.toApiMessage(): ApiMessage {
         val roleString = when (role) {
             Role.USER -> "user"

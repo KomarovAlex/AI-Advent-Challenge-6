@@ -2,25 +2,21 @@ package ru.koalexse.aichallenge.data
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import ru.koalexse.aichallenge.agent.StatsLLMApi
 import ru.koalexse.aichallenge.domain.ChatRequest
 import ru.koalexse.aichallenge.domain.StatsStreamResult
 import ru.koalexse.aichallenge.domain.StreamResult
 import ru.koalexse.aichallenge.domain.TokenStats
 
 /**
- * Интерфейс для API с поддержкой статистики времени
- */
-interface StatsLLMApi {
-    fun sendMessageStream(chatRequest: ChatRequest): Flow<StatsStreamResult>
-}
-
-/**
- * Делегат для LLMApi, который добавляет статистику времени к результатам стриминга.
- * 
- * Преобразует StreamResult в StatsStreamResult, добавляя:
+ * Декоратор над [LLMApi], добавляющий статистику времени к результатам стриминга.
+ *
+ * Преобразует [StreamResult] в [StatsStreamResult], добавляя:
  * - время до первого токена (TTFT)
  * - общую длительность запроса
- * 
+ *
+ * Реализует [StatsLLMApi] из слоя `agent/` — зависимость направлена внутрь. ✅
+ *
  * @param delegate оригинальный API, к которому делегируются вызовы
  */
 class StatsTrackingLLMApi(
@@ -30,7 +26,7 @@ class StatsTrackingLLMApi(
     override fun sendMessageStream(chatRequest: ChatRequest): Flow<StatsStreamResult> {
         val startTime = System.currentTimeMillis()
         var timeToFirstToken: Long? = null
-        
+
         return delegate.sendMessageStream(chatRequest)
             .map { result ->
                 when (result) {

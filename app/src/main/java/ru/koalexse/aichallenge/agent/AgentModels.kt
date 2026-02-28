@@ -26,18 +26,20 @@ val AgentMessage.isUser: Boolean
 
 /**
  * Запрос к агенту
- * 
+ *
+ * История диалога не передаётся в запросе — агент управляет ею самостоятельно
+ * через внутренний контекст. Запрос содержит только параметры конкретного вызова.
+ *
  * @param userMessage текст сообщения пользователя
- * @param conversationHistory история предыдущих сообщений (опционально)
- * @param systemPrompt системный промпт для настройки поведения агента (опционально)
+ * @param systemPrompt системный промпт для настройки поведения агента (опционально,
+ *                     переопределяет [AgentConfig.defaultSystemPrompt])
  * @param model название модели LLM
- * @param temperature температура генерации (0.0-2.0)
+ * @param temperature температура генерации (0.0–2.0)
  * @param maxTokens максимальное количество токенов в ответе
  * @param stopSequences последовательности для остановки генерации
  */
 data class AgentRequest(
     val userMessage: String,
-    val conversationHistory: List<AgentMessage> = emptyList(),
     val systemPrompt: String? = null,
     val model: String,
     val temperature: Float? = null,
@@ -47,7 +49,7 @@ data class AgentRequest(
 
 /**
  * Полный ответ агента (для не-стримингового режима)
- * 
+ *
  * @param content полный текст ответа
  * @param tokenStats статистика использования токенов
  * @param durationMs время генерации ответа в миллисекундах
@@ -68,7 +70,7 @@ sealed class AgentStreamEvent {
      * Частичный контент (чанк текста)
      */
     data class ContentDelta(val text: String) : AgentStreamEvent()
-    
+
     /**
      * Финальная статистика после завершения генерации
      */
@@ -76,7 +78,7 @@ sealed class AgentStreamEvent {
         val tokenStats: TokenStats,
         val durationMs: Long
     ) : AgentStreamEvent()
-    
+
     /**
      * Ошибка во время генерации
      */
@@ -85,7 +87,7 @@ sealed class AgentStreamEvent {
 
 /**
  * Конфигурация агента
- * 
+ *
  * @param defaultModel модель по умолчанию
  * @param defaultTemperature температура по умолчанию
  * @param defaultMaxTokens максимум токенов в ответе по умолчанию
