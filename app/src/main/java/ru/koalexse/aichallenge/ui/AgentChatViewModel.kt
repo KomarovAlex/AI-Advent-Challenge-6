@@ -12,11 +12,8 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.koalexse.aichallenge.agent.Agent
-import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.AgentStreamEvent
-import ru.koalexse.aichallenge.agent.Role
 import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
-import ru.koalexse.aichallenge.agent.isUser
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toMessages
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toSession
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toSessionTokenStats
@@ -84,34 +81,17 @@ class AgentChatViewModel(
     private fun buildUiState(): ChatUiState {
         val internal = _internalState.value
 
-        val compressedMessages = internal.summaries.flatMapIndexed { summaryIndex, summary ->
-            summary.originalMessages.mapIndexed { msgIndex, agentMessage ->
-                agentMessage.toUiMessage(
-                    id = "compressed_${summaryIndex}_${msgIndex}",
-                    isCompressed = true
-                )
-            }
-        }
+        val compressedMessages = internal.summaries.toCompressedUiMessages()
 
-        val historyMessages = agent.conversationHistory.mapIndexed { index, agentMessage ->
-            val isLastAssistant = !agentMessage.isUser && index == agent.conversationHistory.lastIndex
-            agentMessage.toUiMessage(
-                id = "msg_$index",
-                tokenStats = if (isLastAssistant) internal.lastMessageStats else null,
-                responseDurationMs = if (isLastAssistant) internal.lastMessageDuration else null
-            )
-        }
+        val historyMessages = agent.conversationHistory.toActiveUiMessages(
+            lastMessageStats = internal.lastMessageStats,
+            lastMessageDuration = internal.lastMessageDuration
+        )
 
-        val streamingMessages = if (internal.streamingMessage != null) {
-            listOf(internal.streamingMessage.toUiMessage())
-        } else {
-            emptyList()
-        }
-
-        val allMessages = compressedMessages + historyMessages + streamingMessages
+        val streamingMessages = listOfNotNull(internal.streamingMessage?.toUiMessage())
 
         return ChatUiState(
-            messages = allMessages,
+            messages = compressedMessages + historyMessages + streamingMessages,
             availableModels = availableModels,
             settingsData = internal.settingsData,
             currentInput = internal.currentInput,
@@ -271,8 +251,7 @@ class AgentChatViewModel(
                     agent.loadSummaries(savedSummaries)
                 }
 
-                val messages = session.toMessages()
-                messages.forEach { message -> agent.addToHistory(message) }
+                session.toMessages().forEach { agent.addToHistory(it) }
 
                 session.model?.let { model ->
                     if (model in availableModels) {
@@ -283,11 +262,9 @@ class AgentChatViewModel(
                     }
                 }
 
-                val savedStats = session.toSessionTokenStats()
-
                 _internalState.update { state ->
                     state.copy(
-                        sessionStats = savedStats ?: SessionTokenStats(),
+                        sessionStats = session.toSessionTokenStats() ?: SessionTokenStats(),
                         summaries = savedSummaries
                     )
                 }
@@ -306,17 +283,13 @@ class AgentChatViewModel(
         if (history.isEmpty()) return
 
         try {
-            val sessionStats = _internalState.value.sessionStats
-            val summaries = agent.getSummaries()
-
             val session = history.toSession(
                 sessionId = currentSessionId,
                 model = agent.config.defaultModel,
                 createdAt = sessionCreatedAt,
-                sessionStats = sessionStats.takeIf { it.messageCount > 0 },
-                summaries = summaries
+                sessionStats = _internalState.value.sessionStats.takeIf { it.messageCount > 0 },
+                summaries = agent.getSummaries()
             )
-
             chatHistoryRepository.saveSession(session)
             chatHistoryRepository.setActiveSession(currentSessionId)
         } catch (e: Exception) {
@@ -324,22 +297,7 @@ class AgentChatViewModel(
         }
     }
 
-    // ==================== Конвертеры ====================
-
-    private fun AgentMessage.toUiMessage(
-        id: String,
-        tokenStats: TokenStats? = null,
-        responseDurationMs: Long? = null,
-        isCompressed: Boolean = false
-    ): Message = Message(
-        id = id,
-        isUser = role == Role.USER,
-        text = content,
-        isLoading = false,
-        tokenStats = tokenStats,
-        responseDurationMs = responseDurationMs,
-        isCompressed = isCompressed
-    )
+    // ==================== Конвертер стримингового сообщения ====================
 
     private fun StreamingMessage.toUiMessage(): Message = Message(
         id = "streaming_msg",

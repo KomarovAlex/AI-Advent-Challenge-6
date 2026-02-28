@@ -8,16 +8,20 @@ class AgentChatViewModel(
     private val availableModels: List<String>,
     private val chatHistoryRepository: ChatHistoryRepository? = null
 ) : ViewModel()
-// SummaryStorage не передаётся — summaries доступны через agent.getSummaries()
 ```
 
 ### Сборка списка сообщений
 
 ```kotlin
-allMessages =
-    summaries.flatMap { it.originalMessages }  // isCompressed=true, не идут в LLM
-    + agent.conversationHistory                // активная история
-    + streamingMessage?                        // текущий стрим
+// buildUiState() — декларативно, детали скрыты в AgentMessageUiMapper
+val compressedMessages = internal.summaries.toCompressedUiMessages()
+val historyMessages    = agent.conversationHistory.toActiveUiMessages(
+    lastMessageStats   = internal.lastMessageStats,
+    lastMessageDuration = internal.lastMessageDuration
+)
+val streamingMessages  = listOfNotNull(internal.streamingMessage?.toUiMessage())
+
+allMessages = compressedMessages + historyMessages + streamingMessages
 ```
 
 ### MVI Intents
@@ -36,6 +40,33 @@ sealed class ChatIntent {
 Добавить новый intent:
 1. Добавить case в `sealed class ChatIntent`
 2. Обработать в `handleIntent()` в ViewModel
+
+## AgentMessageUiMapper
+
+**Файл:** `ui/AgentMessageUiMapper.kt`
+
+Extension-функции для конвертации агентных моделей в UI-модели.
+Живут в `ui/` — знают про `isCompressed`, `isLoading` и другие UI-концепты.
+
+```kotlin
+// Одно сообщение → UI
+fun AgentMessage.toUiMessage(
+    id: String,
+    tokenStats: TokenStats? = null,
+    responseDurationMs: Long? = null,
+    isCompressed: Boolean = false
+): Message
+
+// Summaries → сжатые UI-сообщения (isCompressed=true)
+fun List<ConversationSummary>.toCompressedUiMessages(): List<Message>
+
+// Активная история → UI-сообщения
+// Последнему ответу ассистента проставляются stats и duration
+fun List<AgentMessage>.toActiveUiMessages(
+    lastMessageStats: TokenStats? = null,
+    lastMessageDuration: Long? = null
+): List<Message>
+```
 
 ## ChatUiState
 
@@ -92,7 +123,7 @@ if (message.isCompressed) CompressedMessageBubble(...) else MessageBubble(...)
 
 **Загрузка** (`loadSavedHistory`):
 1. `chatHistoryRepository.loadActiveSession()`
-2. `agent.loadSummaries(savedSummaries)` — summaries уходят в агент
+2. `agent.loadSummaries(savedSummaries)`
 3. `agent.addToHistory(message)` для каждого сообщения
 
 **Сохранение** (`saveHistory`):

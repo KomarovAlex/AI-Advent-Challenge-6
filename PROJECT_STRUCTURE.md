@@ -41,6 +41,7 @@ app/src/main/java/ru/koalexse/aichallenge/
 │   └── AppModule.kt                # AppModule, AppContainer
 └── ui/
     ├── AgentChatViewModel.kt       # ViewModel + ChatIntent
+    ├── AgentMessageUiMapper.kt     # AgentMessage/ConversationSummary → Message
     ├── ChatScreen.kt               # MessageBubble, CompressedMessageBubble
     ├── Dialog.kt
     └── state/
@@ -55,5 +56,5 @@ app/src/main/java/ru/koalexse/aichallenge/
 | [docs/AGENT.md](./docs/AGENT.md) | Agent, SimpleLLMAgent, AgentContext, buildMessageList |
 | [docs/COMPRESSION.md](./docs/COMPRESSION.md) | Summary-компрессия, SummaryStorage, стратегии |
 | [docs/DATA_LAYER.md](./docs/DATA_LAYER.md) | API, persistence, domain-модели |
-| [docs/UI_LAYER.md](./docs/UI_LAYER.md) | ViewModel, MVI, ChatUiState, Composable |
+| [docs/UI_LAYER.md](./docs/UI_LAYER.md) | ViewModel, MVI, ChatUiState, AgentMessageUiMapper |
 | [docs/RECIPES.md](./docs/RECIPES.md) | Быстрый старт, типичные задачи, тесты |
