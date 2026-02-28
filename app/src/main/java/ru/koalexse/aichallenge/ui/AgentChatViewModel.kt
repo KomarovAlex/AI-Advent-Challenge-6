@@ -16,7 +16,6 @@ import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.AgentStreamEvent
 import ru.koalexse.aichallenge.agent.Role
 import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
-import ru.koalexse.aichallenge.agent.context.summary.SummaryStorage
 import ru.koalexse.aichallenge.agent.isUser
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toMessages
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toSession
@@ -34,8 +33,7 @@ import java.util.UUID
 class AgentChatViewModel(
     private val agent: Agent,
     private val availableModels: List<String>,
-    private val chatHistoryRepository: ChatHistoryRepository? = null,
-    private val summaryStorage: SummaryStorage? = null
+    private val chatHistoryRepository: ChatHistoryRepository? = null
 ) : ViewModel() {
 
     private data class StreamingMessage(
@@ -56,7 +54,6 @@ class AgentChatViewModel(
         val lastMessageDuration: Long? = null,
         val isHistoryLoading: Boolean = true,
         val sessionStats: SessionTokenStats = SessionTokenStats(),
-        // Список сжатых summaries — для отображения оригинальных сообщений в UI
         val summaries: List<ConversationSummary> = emptyList()
     )
 
@@ -87,7 +84,6 @@ class AgentChatViewModel(
     private fun buildUiState(): ChatUiState {
         val internal = _internalState.value
 
-        // Сжатые сообщения из summaries (только для отображения, не отправляются в LLM)
         val compressedMessages = internal.summaries.flatMapIndexed { summaryIndex, summary ->
             summary.originalMessages.mapIndexed { msgIndex, agentMessage ->
                 agentMessage.toUiMessage(
@@ -97,7 +93,6 @@ class AgentChatViewModel(
             }
         }
 
-        // Активные сообщения из истории агента
         val historyMessages = agent.conversationHistory.mapIndexed { index, agentMessage ->
             val isLastAssistant = !agentMessage.isUser && index == agent.conversationHistory.lastIndex
             agentMessage.toUiMessage(
@@ -107,7 +102,6 @@ class AgentChatViewModel(
             )
         }
 
-        // Стримящееся сообщение
         val streamingMessages = if (internal.streamingMessage != null) {
             listOf(internal.streamingMessage.toUiMessage())
         } else {
@@ -178,7 +172,7 @@ class AgentChatViewModel(
                 }
 
                 is AgentStreamEvent.Completed -> {
-                    val newSummaries = loadCurrentSummaries()
+                    val newSummaries = agent.getSummaries()
                     _internalState.update { state ->
                         state.copy(
                             streamingMessage = state.streamingMessage?.copy(
@@ -257,15 +251,6 @@ class AgentChatViewModel(
         }
     }
 
-    // ==================== Вспомогательные методы ====================
-
-    /**
-     * Загружает актуальный список summaries из storage
-     */
-    private suspend fun loadCurrentSummaries(): List<ConversationSummary> {
-        return summaryStorage?.getSummaries() ?: emptyList()
-    }
-
     // ==================== Persistence ====================
 
     private suspend fun loadSavedHistory() {
@@ -282,8 +267,8 @@ class AgentChatViewModel(
                 sessionCreatedAt = session.createdAt
 
                 val savedSummaries = session.toSummaries()
-                if (savedSummaries.isNotEmpty() && summaryStorage != null) {
-                    summaryStorage.loadSummaries(savedSummaries)
+                if (savedSummaries.isNotEmpty()) {
+                    agent.loadSummaries(savedSummaries)
                 }
 
                 val messages = session.toMessages()
@@ -322,7 +307,7 @@ class AgentChatViewModel(
 
         try {
             val sessionStats = _internalState.value.sessionStats
-            val summaries = summaryStorage?.getSummaries() ?: emptyList()
+            val summaries = agent.getSummaries()
 
             val session = history.toSession(
                 sessionId = currentSessionId,
@@ -335,7 +320,6 @@ class AgentChatViewModel(
             chatHistoryRepository.saveSession(session)
             chatHistoryRepository.setActiveSession(currentSessionId)
         } catch (e: Exception) {
-            // Логируем ошибку
             println(e)
         }
     }

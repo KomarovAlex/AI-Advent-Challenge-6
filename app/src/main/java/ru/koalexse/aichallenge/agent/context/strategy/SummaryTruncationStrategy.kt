@@ -53,18 +53,15 @@ class SummaryTruncationStrategy(
 
         if (oldMessages.size >= summaryBlockSize) {
             val summaryText = summaryProvider.summarize(oldMessages)
-
-            val summary = ConversationSummary(
-                content = summaryText,
-                // Сохраняем оригинальные сообщения для отображения в UI
-                originalMessages = oldMessages
+            summaryStorage.addSummary(
+                ConversationSummary(
+                    content = summaryText,
+                    originalMessages = oldMessages
+                )
             )
-            summaryStorage.addSummary(summary)
-
             return recentMessages
         }
 
-        // Если summary не нужно — применяем обычные ограничения
         var result = messages
 
         if (maxMessages != null && result.size > maxMessages) {
@@ -79,7 +76,8 @@ class SummaryTruncationStrategy(
     }
 
     /**
-     * Возвращает все summaries как системные сообщения для подстановки в запрос к LLM
+     * Возвращает все summaries как системные сообщения для подстановки в LLM-запрос.
+     * Включает только [ConversationSummary.content] — originalMessages не передаются.
      */
     suspend fun getSummariesAsMessages(): List<AgentMessage> = withContext(Dispatchers.IO) {
         val summaries = summaryStorage.getSummaries()
@@ -88,17 +86,32 @@ class SummaryTruncationStrategy(
         val combinedSummary = buildString {
             append("Previous conversation summary:\n")
             summaries.forEachIndexed { index, summary ->
-                if (summaries.size > 1) {
-                    append("[Part ${index + 1}] ")
-                }
+                if (summaries.size > 1) append("[Part ${index + 1}] ")
                 append(summary.content)
                 if (index < summaries.lastIndex) append("\n\n")
             }
         }
 
-        return@withContext listOf(AgentMessage(role = Role.SYSTEM, content = combinedSummary))
+        listOf(AgentMessage(role = Role.SYSTEM, content = combinedSummary))
     }
 
+    /**
+     * Возвращает список [ConversationSummary] для UI и persistence.
+     */
+    suspend fun getSummaries(): List<ConversationSummary> {
+        return summaryStorage.getSummaries()
+    }
+
+    /**
+     * Загружает summaries при восстановлении сессии.
+     */
+    suspend fun loadSummaries(summaries: List<ConversationSummary>) {
+        summaryStorage.loadSummaries(summaries)
+    }
+
+    /**
+     * Очищает все summaries.
+     */
     suspend fun clearSummaries() {
         summaryStorage.clear()
     }

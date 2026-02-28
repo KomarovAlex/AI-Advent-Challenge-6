@@ -1,70 +1,61 @@
 package ru.koalexse.aichallenge.data.persistence
 
 /**
- * Интерфейс репозитория для хранения истории чата
+ * Интерфейс репозитория для хранения истории чата.
+ *
+ * Намеренно живёт в data/persistence/ — оперирует persistence-моделями
+ * (ChatSession, PersistedAgentMessage), которые являются деталями сериализации.
+ * Перенос в domain/ потребовал бы перетащить туда весь ChatSession — это хуже.
+ *
+ * ViewModel зависит от этого интерфейса напрямую — допустимо для проекта
+ * без отдельного use case слоя.
  */
 interface ChatHistoryRepository {
-    
+
     /**
-     * Сохраняет сессию чата
-     * Если сессия с таким ID уже существует, она будет перезаписана
-     * 
-     * @param session сессия для сохранения
+     * Сохраняет сессию чата.
+     * Если сессия с таким ID уже существует — перезаписывает.
      */
     suspend fun saveSession(session: ChatSession)
-    
+
     /**
-     * Загружает сессию по ID
-     * 
-     * @param sessionId ID сессии
-     * @return сессия или null, если не найдена
+     * Загружает сессию по ID.
      */
     suspend fun loadSession(sessionId: String): ChatSession?
-    
+
     /**
-     * Загружает последнюю (самую свежую) сессию
-     * 
-     * @return последняя сессия или null, если сессий нет
+     * Загружает последнюю по времени обновления сессию.
      */
     suspend fun loadLatestSession(): ChatSession?
-    
+
     /**
-     * Загружает активную сессию (помеченную как текущая)
-     * Если активная сессия не задана, возвращает последнюю
-     * 
-     * @return активная сессия или null
+     * Загружает активную сессию.
+     * Если активная не задана — возвращает последнюю.
      */
     suspend fun loadActiveSession(): ChatSession?
-    
+
     /**
-     * Устанавливает активную сессию
-     * 
-     * @param sessionId ID сессии, которую нужно сделать активной
+     * Помечает сессию как активную.
      */
     suspend fun setActiveSession(sessionId: String)
-    
+
     /**
-     * Удаляет сессию по ID
-     * 
-     * @param sessionId ID сессии для удаления
+     * Удаляет сессию по ID.
      */
     suspend fun deleteSession(sessionId: String)
-    
+
     /**
-     * Возвращает список всех сохранённых сессий
-     * Отсортирован по времени обновления (сначала новые)
-     * 
-     * @return список сессий
+     * Возвращает все сессии, отсортированные по времени обновления (новые первые).
      */
     suspend fun getAllSessions(): List<ChatSession>
-    
+
     /**
-     * Удаляет все сохранённые сессии
+     * Удаляет все сессии.
      */
     suspend fun clearAll()
-    
+
     /**
-     * Возвращает ID активной сессии
+     * Возвращает ID активной сессии.
      */
     suspend fun getActiveSessionId(): String?
 }

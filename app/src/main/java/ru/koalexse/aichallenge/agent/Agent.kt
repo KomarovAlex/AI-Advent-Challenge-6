@@ -1,6 +1,7 @@
 package ru.koalexse.aichallenge.agent
 
 import kotlinx.coroutines.flow.Flow
+import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
 import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
 
 /**
@@ -12,8 +13,10 @@ import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
  * Агент является чистой сущностью без зависимостей на Android фреймворк
  * и может использоваться в любом окружении (Android, CLI, тесты).
  *
- * Контекст диалога инкапсулирован внутри агента — доступ к истории
- * только через [conversationHistory], мутации — только через методы агента.
+ * Контекст диалога и summaries инкапсулированы внутри агента:
+ * - история — только через [conversationHistory] (read-only)
+ * - summaries — только через [getSummaries] / [loadSummaries]
+ * - мутации — только через методы агента
  */
 interface Agent {
 
@@ -24,19 +27,31 @@ interface Agent {
 
     /**
      * Стратегия обрезки контекста (null = без обрезки)
-     *
-     * Стратегия применяется агентом после добавления сообщений в историю.
-     * Позволяет ограничивать размер истории или сжимать старые сообщения.
      */
     val truncationStrategy: ContextTruncationStrategy?
 
     /**
-     * Read-only снимок истории диалога.
-     *
-     * Только для чтения — мутации истории возможны исключительно
-     * через [addToHistory] и [clearHistory].
+     * Read-only снимок активной истории диалога.
+     * Не включает сообщения, сжатые в summaries.
      */
     val conversationHistory: List<AgentMessage>
+
+    /**
+     * Возвращает список сжатых summaries.
+     * Используется ViewModel для отображения сжатых сообщений в UI
+     * и для сохранения сессии.
+     *
+     * Если стратегия компрессии не установлена — возвращает пустой список.
+     */
+    suspend fun getSummaries(): List<ConversationSummary>
+
+    /**
+     * Загружает summaries при восстановлении сессии.
+     * Если стратегия компрессии не установлена — игнорирует вызов.
+     *
+     * @param summaries список summaries для загрузки
+     */
+    suspend fun loadSummaries(summaries: List<ConversationSummary>)
 
     /**
      * Отправляет запрос и получает полный ответ (не-стриминговый режим)
@@ -65,14 +80,12 @@ interface Agent {
     suspend fun send(message: String): Flow<AgentStreamEvent>
 
     /**
-     * Очищает историю диалога
+     * Очищает историю диалога и все summaries
      */
     suspend fun clearHistory()
 
     /**
      * Добавляет сообщение в историю вручную.
-     * Полезно для восстановления контекста или инъекции сообщений.
-     *
      * После добавления применяется стратегия обрезки, если она установлена.
      *
      * @param message сообщение для добавления
@@ -81,15 +94,11 @@ interface Agent {
 
     /**
      * Обновляет конфигурацию агента
-     *
-     * @param newConfig новая конфигурация
      */
     fun updateConfig(newConfig: AgentConfig)
 
     /**
      * Обновляет стратегию обрезки контекста
-     *
-     * @param strategy новая стратегия (null = отключить обрезку)
      */
     fun updateTruncationStrategy(strategy: ContextTruncationStrategy?)
 }
@@ -99,27 +108,15 @@ interface Agent {
  */
 sealed class AgentException(message: String, cause: Throwable? = null) : Exception(message, cause) {
 
-    /**
-     * Ошибка API (сетевая ошибка, ошибка сервера и т.д.)
-     */
     class ApiError(
         message: String,
         val statusCode: Int? = null,
         cause: Throwable? = null
     ) : AgentException(message, cause)
 
-    /**
-     * Ошибка конфигурации (неверные параметры)
-     */
     class ConfigurationError(message: String) : AgentException(message)
 
-    /**
-     * Ошибка валидации запроса
-     */
     class ValidationError(message: String) : AgentException(message)
 
-    /**
-     * Таймаут запроса
-     */
     class TimeoutError(message: String, cause: Throwable? = null) : AgentException(message, cause)
 }
