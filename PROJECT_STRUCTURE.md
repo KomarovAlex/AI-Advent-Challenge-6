@@ -61,32 +61,58 @@ app/src/main/java/ru/koalexse/aichallenge/
 ```kotlin
 interface Agent {
     val config: AgentConfig
-    val context: AgentContext                           // Простое хранилище сообщений
-    val truncationStrategy: ContextTruncationStrategy? // Стратегия обрезки
+    val truncationStrategy: ContextTruncationStrategy?
+
+    // Read-only снимок истории — мутации только через методы агента
     val conversationHistory: List<AgentMessage>
 
     suspend fun chat(request: AgentRequest): AgentResponse
-    fun chatStream(request: AgentRequest): Flow<AgentStreamEvent>
-    fun send(message: String): Flow<AgentStreamEvent>
-    fun clearHistory()
+    suspend fun chatStream(request: AgentRequest): Flow<AgentStreamEvent>
+    suspend fun send(message: String): Flow<AgentStreamEvent>
+    suspend fun clearHistory()
     suspend fun addToHistory(message: AgentMessage)
     fun updateConfig(newConfig: AgentConfig)
     fun updateTruncationStrategy(strategy: ContextTruncationStrategy?)
 }
 ```
 
+**Ключевые принципы:**
+- `AgentContext` **инкапсулирован** внутри реализации — снаружи недоступен
+- История передаётся наружу только через `conversationHistory` (read-only снимок)
+- Все мутации истории — строго через `addToHistory` / `clearHistory`
+
 **Реализация:** `SimpleLLMAgent`
-- Стриминг через `channelFlow` (избежание deadlock)
+- Стриминг через `.map` + `.catch` на Flow от API
 - После каждого `addMessage` применяет `truncationStrategy`
 - При формировании запроса подставляет summaries из стратегии
 
 ---
 
-### 2. AgentContext (Контекст диалога)
+### 2. AgentRequest
+
+**Файл:** `agent/AgentModels.kt`
+
+```kotlin
+data class AgentRequest(
+    val userMessage: String,
+    val systemPrompt: String? = null,   // переопределяет defaultSystemPrompt из конфига
+    val model: String,
+    val temperature: Float? = null,
+    val maxTokens: Long? = null,
+    val stopSequences: List<String>? = null
+)
+```
+
+> История диалога **не передаётся** в запросе — агент управляет ею самостоятельно
+> через внутренний `AgentContext`. Запрос содержит только параметры конкретного вызова.
+
+---
+
+### 3. AgentContext (Контекст диалога)
 
 **Файл:** `agent/context/AgentContext.kt`
 
-Простое потокобезопасное хранилище сообщений. Вся логика обрезки — в агенте.
+Приватное потокобезопасное хранилище сообщений внутри агента. Снаружи недоступно.
 
 ```kotlin
 interface AgentContext {
@@ -94,6 +120,10 @@ interface AgentContext {
     val isEmpty: Boolean
 
     fun getHistory(): List<AgentMessage>
+    fun getLastMessages(count: Int): List<AgentMessage>
+    fun getMessagesByRole(role: Role): List<AgentMessage>
+    fun getLastMessage(): AgentMessage?
+    fun getLastMessageByRole(role: Role): AgentMessage?
     fun addMessage(message: AgentMessage)
     fun addUserMessage(content: String): AgentMessage
     fun addAssistantMessage(content: String): AgentMessage
@@ -109,7 +139,30 @@ interface AgentContext {
 
 ---
 
-### 3. Компрессия истории (Summary)
+### 4. Структура buildMessageList
+
+**Файл:** `agent/SimpleLLMAgent.kt`
+
+```
+LLM-запрос строится из четырёх частей:
+
+1. [system]  "You are a helpful assistant"       ← systemPrompt (если есть)
+2. [system]  "Previous conversation summary: …"  ← content из ConversationSummary
+3. [user]    "M11"                               ┐
+   [assistant] "A11"                             │ активная история из _context
+   …                                             │ (уже содержит текущий userMessage,
+   [user]    "Новый вопрос"                      ┘ добавленный до buildMessageList)
+
+   ИЛИ (если keepConversationHistory = false):
+3. [user]    "Новый вопрос"                      ← только текущее сообщение
+
+НЕ уходит в LLM:
+  originalMessages (M1..M10)                     ← только отображаются в UI
+```
+
+---
+
+### 5. Компрессия истории (Summary)
 
 #### Принцип работы
 
@@ -138,7 +191,7 @@ interface AgentContext {
 
 ```kotlin
 data class ConversationSummary(
-    val content: String,                    // Текст summary → отправляется в LLM
+    val content: String,                      // Текст summary → отправляется в LLM
     val originalMessages: List<AgentMessage>, // Исходные сообщения → только для UI
     val createdAt: Long = System.currentTimeMillis()
 ) {
@@ -146,7 +199,9 @@ data class ConversationSummary(
 }
 ```
 
-> **Ключевое решение:** `originalMessages` хранятся только для отображения пользователю с пометкой "сжато". В запрос к LLM они **не включаются** — вместо них подставляется `content` (текст summary).
+> **Ключевое решение:** `originalMessages` хранятся только для отображения пользователю
+> с пометкой "сжато". В запрос к LLM они **не включаются** — вместо них подставляется
+> `content` (текст summary).
 
 #### SummaryTruncationStrategy
 
@@ -157,7 +212,8 @@ class SummaryTruncationStrategy(
     private val summaryProvider: SummaryProvider,
     private val summaryStorage: SummaryStorage,
     private val keepRecentCount: Int = 10,
-    private val summaryBlockSize: Int = 10
+    private val summaryBlockSize: Int = 10,
+    private val tokenEstimator: (AgentMessage) -> Int = { ... }
 ) : ContextTruncationStrategy {
 
     override suspend fun truncate(
@@ -166,15 +222,9 @@ class SummaryTruncationStrategy(
         maxMessages: Int?
     ): List<AgentMessage>
 
-    // Suspend-версии (предпочтительно)
-    suspend fun getSummariesAsMessagesSuspend(): List<AgentMessage>
-    suspend fun clearSummariesSuspend()
-    suspend fun getCompressedMessageCountSuspend(): Int
-
-    // Синхронные версии (используют runBlocking, для совместимости)
-    fun getSummariesAsMessages(): List<AgentMessage>
-    fun clearSummaries()
-    fun getCompressedMessageCount(): Int
+    // Только suspend-версии (runBlocking не используется)
+    suspend fun getSummariesAsMessages(): List<AgentMessage>
+    suspend fun clearSummaries()
 }
 ```
 
@@ -212,7 +262,7 @@ class SimpleSummaryProvider : SummaryProvider  // Fallback без LLM
 
 ---
 
-### 4. Data Layer (Слой данных)
+### 6. Data Layer (Слой данных)
 
 #### LLMApi / StatsLLMApi
 
@@ -261,7 +311,7 @@ data class ChatSession(
 
 ---
 
-### 5. Domain Models (Доменные модели)
+### 7. Domain Models (Доменные модели)
 
 **Файл:** `domain/Models.kt`
 
@@ -279,7 +329,7 @@ data class Message(
 
 ---
 
-### 6. UI Layer (Слой UI)
+### 8. UI Layer (Слой UI)
 
 #### ViewModel — формирование списка сообщений
 
@@ -299,7 +349,7 @@ class AgentChatViewModel(
 ```
 allMessages =
     summaries.flatMap { it.originalMessages }   // isCompressed = true, только UI
-    + agent.conversationHistory                 // активная история
+    + agent.conversationHistory                 // активная история (read-only снимок)
     + streamingMessage?                         // текущий стрим
 ```
 
@@ -349,7 +399,7 @@ data class ChatUiState(
 
 ---
 
-### 7. Dependency Injection
+### 9. Dependency Injection
 
 **Файл:** `di/AppModule.kt`
 
@@ -390,7 +440,8 @@ class AppModule(context, apiKey, baseUrl, availableModels) {
 │                      │  + streaming         │                           │
 │                      └──────────┬───────────┘                           │
 └─────────────────────────────────┼───────────────────────────────────────┘
-                                  │
+                                  │ agent.conversationHistory (read-only)
+                                  │ agent.send() / addToHistory() / clearHistory()
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                            Agent Layer                                   │
@@ -398,18 +449,18 @@ class AppModule(context, apiKey, baseUrl, availableModels) {
 │  │                        SimpleLLMAgent                              │ │
 │  │                                                                   │ │
 │  │  addMessageWithTruncation()                                       │ │
-│  │    → context.addMessage()                                         │ │
+│  │    → _context.addMessage()          (приватный AgentContext)      │ │
 │  │    → truncationStrategy.truncate()                                │ │
-│  │    → context.replaceHistory()                                     │ │
+│  │    → _context.replaceHistory()                                    │ │
 │  │                                                                   │ │
-│  │  buildMessageList() для LLM-запроса:                              │ │
-│  │    [SystemPrompt] + [SummaryMessages] + [ActiveHistory] + [New]   │ │
+│  │  buildMessageList():                                              │ │
+│  │    [SystemPrompt] + [SummaryMessages] + [_context.getHistory()]   │ │
 │  │                                ↑                                  │ │
-│  │                   НЕ включает originalMessages!                   │ │
+│  │               НЕ включает originalMessages!                       │ │
 │  │                                                                   │ │
 │  │  ┌─────────────────┐    ┌──────────────────────────────────────┐ │ │
 │  │  │  AgentContext   │    │     SummaryTruncationStrategy        │ │ │
-│  │  │ (хранилище msg) │    │  keepRecentCount / summaryBlockSize  │ │ │
+│  │  │ (приватный)     │    │  keepRecentCount / summaryBlockSize  │ │ │
 │  │  └─────────────────┘    └──────────────┬───────────────────────┘ │ │
 │  │                                        │                          │ │
 │  │                         ┌──────────────┴──────────┐              │ │
@@ -444,14 +495,28 @@ class AppModule(context, apiKey, baseUrl, availableModels) {
 
 | Компонент | Ответственность |
 |-----------|-----------------|
-| `AgentContext` | Потокобезопасное хранилище сообщений (`synchronized`) |
-| `Agent` | Отправка запросов, применение стратегии обрезки |
+| `AgentContext` | Приватное потокобезопасное хранилище сообщений (`synchronized`) |
+| `Agent` | Отправка запросов, инкапсуляция истории, применение стратегии обрезки |
 | `TruncationStrategy` | Логика обрезки / компрессии истории (`suspend`) |
 | `SummaryStorage` | Хранение summaries (IO через `Mutex` + `Dispatchers.IO`) |
 | `ConversationSummary.content` | Текст summary → отправляется в LLM |
 | `ConversationSummary.originalMessages` | Исходные сообщения → только для UI |
 | `ViewModel` | Сборка `allMessages` из сжатых + активных + стримящихся |
 | `CompressedMessageBubble` | Отображение сжатых сообщений с пометкой |
+
+### Инкапсуляция истории
+
+```
+Снаружи агента:                    Внутри агента:
+┌────────────────────┐             ┌────────────────────────────┐
+│ agent              │             │ _context: AgentContext      │
+│   .conversationHistory  ←──────── │   (приватный)              │
+│     (read-only List)│             │                            │
+│   .send()          │──────────▶  │ addMessageWithTruncation() │
+│   .addToHistory()  │──────────▶  │ applyTruncation()          │
+│   .clearHistory()  │──────────▶  │ buildMessageList()         │
+└────────────────────┘             └────────────────────────────┘
+```
 
 ### Что уходит в LLM, что нет
 
@@ -462,8 +527,7 @@ LLM-запрос:
   [user]   "M11"
   [assistant] "A11"
   ...
-  [user]   "M15"                                  ← последние keepRecentCount сообщений
-  [user]   "Новый вопрос"
+  [user]   "M15 + новый вопрос"                  ← вся _context.getHistory()
 
 НЕ уходит в LLM:
   originalMessages (M1..M10)                      ← только отображаются в UI
@@ -475,20 +539,18 @@ LLM-запрос:
 |-----------|----------|---------|
 | `SimpleAgentContext` | `synchronized` | Синхронные методы |
 | `SummaryStorage` | `Mutex` | suspend-методы с IO |
-| `SimpleLLMAgent.chatStream` | `channelFlow` | Избежание deadlock |
+| `SimpleLLMAgent._config` | `synchronized(this)` | Мутация из разных корутин |
+| `SimpleLLMAgent` стриминг | `.map` + `.catch` на Flow | Нет вложенного collect |
 
-### Почему `channelFlow` вместо `flow`
+### Почему `.map` + `.catch` вместо `channelFlow`
 
 ```kotlin
-// ❌ Deadlock: collect блокирует, emit ждёт
-flow {
-    upstream.collect { emit(transform(it)) }
-}
+// ✅ Используется: map трансформирует элементы без вложенного collect
+api.sendMessageStream(chatRequest)
+    .map { result -> transform(result) }
+    .catch { e -> emit(AgentStreamEvent.Error(e)) }
 
-// ✅ Безопасно: channel не блокирует корутину
-channelFlow {
-    upstream.collect { send(transform(it)) }
-}
+// ❌ Избегаем: channelFlow нужен только если collect вложен в flow { }
 ```
 
 ### Почему `Mutex` вместо `synchronized` в suspend-функциях
@@ -683,19 +745,20 @@ fun `compressed messages visible in UI but not sent to LLM`() = runTest {
    - Сжатые сообщения (`isCompressed = true`) — из `summary.originalMessages`, не идут в LLM
    - Активные сообщения — из `agent.conversationHistory`, идут в LLM
 
-3. **Стратегия обрезки в Agent, не в Context** — контекст только хранит, агент управляет
+3. **AgentContext приватен** — стратегия обрезки в агенте, не в контексте
 
 4. **Все методы SummaryStorage — suspend** — `Mutex` вместо `synchronized`
 
-5. **`channelFlow` для стриминга** — избежание deadlock при `collect` + `send`
+5. **Нет `runBlocking`** в `SummaryTruncationStrategy` — только suspend-методы
 
 ---
 
 ## 🚫 Чего избегать
 
 - Не добавлять Android-зависимости в `agent/` слой
+- Не обращаться к `AgentContext` напрямую снаружи агента — только через интерфейс `Agent`
+- Не передавать историю в `AgentRequest` — агент управляет ею сам
 - Не использовать `synchronized` в suspend-функциях — только `Mutex`
-- Не использовать `flow { collect { emit } }` — только `channelFlow`
-- Не блокировать main thread — все IO на `Dispatchers.IO`
 - Не включать `originalMessages` в LLM-запрос — только `content` из summary
 - Не использовать `GlobalScope` — только `viewModelScope` или структурированные scope
+- Не блокировать main thread — все IO на `Dispatchers.IO`
