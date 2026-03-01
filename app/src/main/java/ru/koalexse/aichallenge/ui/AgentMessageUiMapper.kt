@@ -47,6 +47,22 @@ fun List<ConversationSummary>.toCompressedUiMessages(): List<Message> =
     }
 
 /**
+ * Конвертирует flat-список compressed [AgentMessage] (от StickyFactsStrategy) в UI-сообщения
+ * с пометкой isCompressed=true.
+ *
+ * Используется для отображения сообщений, вытесненных из LLM-контекста стратегией
+ * [ru.koalexse.aichallenge.agent.context.strategy.StickyFactsStrategy], — они хранятся
+ * только для UI и в LLM-запрос не включаются.
+ */
+fun List<AgentMessage>.toFactsCompressedUiMessages(): List<Message> =
+    mapIndexed { index, agentMessage ->
+        agentMessage.toUiMessage(
+            id = "facts_compressed_$index",
+            isCompressed = true
+        )
+    }
+
+/**
  * Конвертирует активную историю агента в UI-сообщения.
  * Последнему ответу ассистента проставляются [lastMessageStats] и [lastMessageDuration].
  */

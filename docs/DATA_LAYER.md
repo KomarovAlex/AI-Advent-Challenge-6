@@ -19,8 +19,6 @@ interface StatsLLMApi {
 
 > `StatsLLMApi` определён в `agent/`, реализован в `data/` — зависимость направлена внутрь. ✅
 
----
-
 ## Domain-модели
 
 ```kotlin
@@ -66,8 +64,6 @@ data class Message(
 )
 ```
 
----
-
 ## Persistence
 
 ```kotlin
@@ -110,56 +106,12 @@ data class PersistedSummary(
 
 `ChatHistoryMapper` — конвертеры `ChatSession` ↔ `AgentMessage` / `ConversationSummary`.
 
----
-
-## Storage-паттерн (Json*Storage)
-
-Все JSON-хранилища (`JsonSummaryStorage`, `JsonFactsStorage`, `JsonBranchStorage`) следуют
-единому паттерну: мутация кэша и запись на диск выполняются **внутри одного** `mutex.withLock`.
-
-```kotlin
-// ✅ Паттерн — атомарность мутации и записи
-override suspend fun addSummary(summary: ConversationSummary) {
-    mutex.withLock {
-        ensureLoadedInternal()    // ленивая загрузка при первом обращении
-        cachedSummaries!!.add(summary)
-        saveLocked()              // запись на диск внутри того же mutex
-    }
-}
-
-private suspend fun saveLocked() {
-    val snapshot = cachedSummaries?.toList() ?: emptyList()
-    withContext(Dispatchers.IO) {
-        file.writeText(gson.toJson(StorageData(entries = snapshot)))
-    }
-}
-
-// ❌ Было в JsonSummaryStorage — fire-and-forget, гонка записей, потеря данных
-private fun scheduleWrite() {
-    writeScope.launch {      // отдельный CoroutineScope — никогда не отменяется
-        saveToDisk()         // конкурентные записи, более старый snapshot мог
-    }                        // перезаписать более новый
-}
-```
-
-**Гарантии паттерна:**
-- Нет `CoroutineScope` — нет утечки (устранён #19)
-- Нет fire-and-forget — данные не теряются при закрытии приложения (устранён #4A)
-- Нет гонки между конкурентными вызовами — snapshot берётся внутри mutex (устранён #4Б)
-- Нет двойной блокировки — snapshot и запись в рамках одного lock (устранён #4В)
-
----
-
 ## Файлы данных
 
-| Файл | Путь на устройстве | Содержимое | Хранилище |
-|------|--------------------|------------|-----------|
-| `chat_history.json` | `files/chat_history.json` | Сессии + сообщения + summaries | `JsonChatHistoryRepository` |
-| `summaries.json` | `files/summaries.json` | Summaries стратегии | `JsonSummaryStorage` |
-| `facts.json` | `files/facts.json` | Факты стратегии | `JsonFactsStorage` |
-| `branches.json` | `files/branches.json` | Ветки диалога | `JsonBranchStorage` |
-
----
+| Файл | Путь на устройстве | Содержимое |
+|------|--------------------|------------|
+| `chat_history.json` | `files/chat_history.json` | Сессии + сообщения + summaries |
+| `summaries.json` | `files/summaries.json` | Summaries (кэш для быстрой загрузки) |
 
 ## Конфигурация (local.properties)
 
