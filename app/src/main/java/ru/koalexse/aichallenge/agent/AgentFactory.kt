@@ -111,7 +111,7 @@ class AgentBuilder {
             defaultStopSequences = stopSequences,
             keepConversationHistory = keepHistory,
             maxHistorySize = maxHistorySize,
-            maxTokens = maxContextTokens
+            maxContextTokens = maxContextTokens
         )
 
         return SimpleLLMAgent(

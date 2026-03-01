@@ -20,6 +20,12 @@ import ru.koalexse.aichallenge.domain.StatsStreamResult
  * - Факты обновляются фоновым LLM-вызовом при явном запросе пользователя
  * - В LLM-запрос уходят: facts (как system-сообщение) + последние N сообщений
  *
+ * ### Capability-интерфейсы
+ * Для управления фактами из ViewModel используйте приведение типа:
+ * ```kotlin
+ * (agent.truncationStrategy as? StickyFactsStrategy)?.getFacts()
+ * ```
+ *
  * @param api             API для LLM-вызова при обновлении фактов
  * @param factsStorage    хранилище фактов (persisted)
  * @param keepRecentCount количество последних сообщений в контексте
@@ -47,7 +53,8 @@ class StickyFactsStrategy(
     ): List<AgentMessage> {
         if (messages.isEmpty()) return messages
 
-        val limit = if (maxMessages != null) minOf(keepRecentCount, maxMessages) else keepRecentCount
+        val limit =
+            if (maxMessages != null) minOf(keepRecentCount, maxMessages) else keepRecentCount
         var result = if (messages.size > limit) messages.takeLast(limit) else messages
 
         if (maxTokens != null) {
@@ -74,13 +81,13 @@ class StickyFactsStrategy(
         return listOf(AgentMessage(role = Role.SYSTEM, content = content))
     }
 
-    // ==================== Facts management (called by Agent) ====================
+    /** Очищает все факты — реализация [ContextTruncationStrategy.clear]. */
+    override suspend fun clear() = clearFacts()
+
+    // ==================== Facts management (called by Agent/ViewModel via cast) ====================
 
     /** Возвращает текущие факты — для UI и persistence. */
     suspend fun getFacts(): List<Fact> = factsStorage.getFacts()
-
-    /** Загружает факты при восстановлении сессии. */
-    suspend fun loadFacts(facts: List<Fact>) = factsStorage.replaceFacts(facts)
 
     /** Очищает все факты. */
     suspend fun clearFacts() = factsStorage.clear()
@@ -167,7 +174,8 @@ class StickyFactsStrategy(
     companion object {
         const val DEFAULT_KEEP_RECENT = 10
 
-        private const val FACTS_EXTRACTION_PROMPT = """You are a fact extractor. Your task is to maintain a key-value list of important facts from the conversation.
+        private const val FACTS_EXTRACTION_PROMPT =
+            """You are a fact extractor. Your task is to maintain a key-value list of important facts from the conversation.
 
 Instructions:
 - Extract or update key facts: goals, constraints, preferences, decisions, agreements, important context

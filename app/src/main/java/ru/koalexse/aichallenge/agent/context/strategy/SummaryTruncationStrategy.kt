@@ -18,6 +18,12 @@ import ru.koalexse.aichallenge.agent.context.summary.SummaryStorage
  * 3. Summary подставляется в LLM-запрос через [getAdditionalSystemMessages]
  * 4. Оригинальные сообщения хранятся для UI с пометкой "сжатые"
  *
+ * ### Capability-интерфейсы
+ * Для доступа к summaries из ViewModel используйте приведение типа:
+ * ```kotlin
+ * (agent.truncationStrategy as? SummaryTruncationStrategy)?.getSummaries()
+ * ```
+ *
  * @param summaryProvider провайдер для генерации summary
  * @param summaryStorage хранилище для сохранения summaries
  * @param keepRecentCount количество последних сообщений, которые не сжимаются
@@ -55,7 +61,15 @@ class SummaryTruncationStrategy(
                     originalMessages = oldMessages
                 )
             )
-            return recentMessages
+            // После сжатия применяем оставшиеся лимиты к recent-части
+            var result = recentMessages
+            if (maxMessages != null && result.size > maxMessages) {
+                result = result.takeLast(maxMessages)
+            }
+            if (maxTokens != null) {
+                result = TruncationUtils.truncateByTokens(result, maxTokens, tokenEstimator)
+            }
+            return result
         }
 
         var result = messages
@@ -91,6 +105,9 @@ class SummaryTruncationStrategy(
 
             listOf(AgentMessage(role = Role.SYSTEM, content = combinedSummary))
         }
+
+    /** Очищает все summaries — реализация [ContextTruncationStrategy.clear]. */
+    override suspend fun clear() = clearSummaries()
 
     /**
      * Возвращает список [ConversationSummary] для UI и persistence.
