@@ -29,7 +29,7 @@ interface Agent {
 ### Доступ к возможностям стратегий (Capability pattern)
 
 Summaries и Facts не входят в `Agent` — это нарушило бы ISP при каждом добавлении стратегии.
-Вместо этого ViewModel обращается к стратегии напрямую через приведение типа:
+ViewModel обращается к стратегии напрямую через приведение типа:
 
 ```kotlin
 // В AgentChatViewModel — capability accessors:
@@ -113,25 +113,77 @@ interface ContextTruncationStrategy {
 }
 ```
 
-`clearHistory()` агента больше не содержит `when (strategy is XxxStrategy)`:
+`clearHistory()` агента не содержит `when (strategy is XxxStrategy)` — OCP соблюдён:
 
 ```kotlin
-// ✅ После рефакторинга — OCP соблюдён
+// ✅ Делегирование — стратегия сама знает, что очищать
 override suspend fun clearHistory() {
     _context.clear()
-    _truncationStrategy?.clear()   // делегирование — стратегия сама знает, что очищать
+    _truncationStrategy?.clear()
+}
+```
+
+---
+
+## SimpleLLMAgent — порядок операций в chat/chatStream
+
+### Инварианты (выполняются в обоих методах)
+
+**1. Валидация — первой, до мутации `_context`**
+
+```kotlin
+// ✅ validateRequest вызывается ДО addMessageWithTruncation
+override suspend fun chat(request: AgentRequest): AgentResponse {
+    validateRequest(request)   // ← если бросит — история не будет изменена
+    val config = _config
+    if (config.keepConversationHistory) {
+        addMessageWithTruncation(AgentMessage(USER, request.userMessage), config)
+    }
+    ...
 }
 
-// ❌ Было до рефакторинга — нарушение OCP
-override suspend fun clearHistory() {
-    _context.clear()
-    when (strategy) {
-        is SummaryTruncationStrategy -> strategy.clearSummaries()
-        is StickyFactsStrategy       -> strategy.clearFacts()
-        is BranchingStrategy         -> strategy.clearBranches()
-        else -> Unit
-    }
+// ❌ Было: история менялась до валидации — при ValidationError оставался
+//    user-message без ответа ассистента (corrupt history)
+override suspend fun chat(request: AgentRequest): AgentResponse {
+    addMessageWithTruncation(...)   // история уже изменена
+    validateRequest(request)        // если бросит — история corrupt
+    ...
 }
+```
+
+**2. Snapshot конфига — одно volatile-чтение на весь вызов**
+
+```kotlin
+// ✅ val config = _config — единственное volatile-чтение
+// Все дальнейшие обращения через локальный config, включая замыкание в .map { }
+override suspend fun chatStream(request: AgentRequest): Flow<AgentStreamEvent> {
+    validateRequest(request)
+    val config = _config                          // ← snapshot
+    if (config.keepConversationHistory) { ... }  // читаем config, не _config
+    val chatRequest = buildChatRequest(request, config)
+    return api.sendMessageStream(chatRequest)
+        .map { result ->
+            when (result) {
+                is Stats -> {
+                    if (config.keepConversationHistory ...) { // тот же snapshot
+                        addMessageWithTruncation(..., config)
+                    }
+                }
+            }
+        }
+}
+
+// ❌ Было: несколько независимых чтений _config — при конкурентном updateConfig()
+//    запрос мог уйти с частично старым, частично новым конфигом
+```
+
+**3. `config` передаётся явно в приватные методы — нет скрытых чтений `_config`**
+
+```kotlin
+private suspend fun buildChatRequest(request: AgentRequest, config: AgentConfig): ChatRequest
+private suspend fun buildMessageList(request: AgentRequest, config: AgentConfig): List<ApiMessage>
+private suspend fun addMessageWithTruncation(message: AgentMessage, config: AgentConfig)
+private suspend fun applyTruncation(config: AgentConfig)
 ```
 
 ---
@@ -141,7 +193,7 @@ override suspend fun clearHistory() {
 Порядок сообщений в запросе к LLM:
 
 ```
-1. [system]    systemPrompt (если есть)
+1. [system]    systemPrompt из request или config.defaultSystemPrompt
 2. [system]    getAdditionalSystemMessages() от стратегии (summary / facts)
 3a. keepConversationHistory=true  → _context.getHistory() (уже содержит userMessage)
 3b. keepConversationHistory=false → только текущий userMessage
@@ -187,31 +239,38 @@ sealed class AgentException : Exception {
 
 ## Потокобезопасность SimpleLLMAgent
 
-| Поле | Механизм | Почему |
-|------|----------|--------|
-| `_config` | `@Volatile` + `synchronized` в setter | Читается в suspend без блокировки, пишется редко |
-| `_truncationStrategy` | `@Volatile` + `synchronized` в setter | То же |
-| `_context` | `synchronized` внутри `SimpleAgentContext` | Методы синхронные, suspend-точек нет |
+| Поле / место | Механизм | Гарантия |
+|---|---|---|
+| `_config` (чтение) | `@Volatile` | Видимость последней записи |
+| `_config` (запись) | `synchronized` в `updateConfig` | Атомарная замена ссылки |
+| `_config` (использование) | `val config = _config` snapshot в начале метода | Согласованность параметров внутри одного вызова |
+| `_truncationStrategy` | то же, что `_config` | то же |
+| `_context` | `synchronized` внутри `SimpleAgentContext` | Потокобезопасные операции над списком |
 | Flow стриминг | `.map` + `.catch` | Нет вложенного collect |
 
 ```kotlin
 // ✅ @Volatile — видимость без блокировки при чтении в suspend
 @Volatile private var _config: AgentConfig = initialConfig
 
-// ✅ synchronized только в не-suspend методах (приостановок не будет)
+// ✅ synchronized только в не-suspend методах (приостановок нет)
 override fun updateConfig(newConfig: AgentConfig) {
     synchronized(this) { _config = newConfig }
 }
 
-// ✅ Snapshot конфига — единственное чтение для согласованности параметров
-override suspend fun send(message: String): Flow<AgentStreamEvent> {
-    val config = _config   // ← snapshot, дальше только config, не _config
-    val request = AgentRequest(model = config.defaultModel, ...)
-    return chatStream(request)
+// ✅ Snapshot — одно volatile-чтение, все обращения через локальную переменную
+override suspend fun chat(request: AgentRequest): AgentResponse {
+    validateRequest(request)   // сначала валидация
+    val config = _config       // потом snapshot
+    // дальше только config.xxx, никогда _config.xxx
 }
 
+// ✅ Snapshot передаётся в приватные методы явно
+private suspend fun buildChatRequest(request: AgentRequest, config: AgentConfig): ChatRequest
+private suspend fun buildMessageList(request: AgentRequest, config: AgentConfig): List<ApiMessage>
+
 // ❌ synchronized в suspend — блокирует поток при приостановке корутины
-override suspend fun bad() {
-    synchronized(this) { withContext(IO) { ... } }  // НЕ ДЕЛАТЬ
-}
+suspend fun bad() { synchronized(lock) { withContext(IO) { } } }
+
+// ✅ Mutex приостанавливает корутину, поток свободен
+suspend fun good() { mutex.withLock { withContext(IO) { } } }
 ```
