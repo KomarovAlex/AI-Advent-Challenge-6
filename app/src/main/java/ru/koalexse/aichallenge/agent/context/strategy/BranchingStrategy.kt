@@ -16,6 +16,12 @@ import java.util.UUID
  * - При переключении ветки история полностью заменяется на историю выбранной ветки
  * - Ветки персистируются в [BranchStorage]
  *
+ * ### Capability-интерфейсы
+ * Для управления ветками из ViewModel используйте приведение типа:
+ * ```kotlin
+ * (agent.truncationStrategy as? BranchingStrategy)?.getBranches()
+ * ```
+ *
  * Стратегия сама НЕ обрезает историю (нет лимитов по умолчанию), но
  * поддерживает опциональный [windowSize] для ограничения через токены/сообщения.
  *
@@ -50,7 +56,10 @@ class BranchingStrategy(
         return result
     }
 
-    // ==================== Branch management ====================
+    /** Очищает все ветки — реализация [ContextTruncationStrategy.clear]. */
+    override suspend fun clear() = clearBranches()
+
+    // ==================== Branch management (called by Agent/ViewModel via cast) ====================
 
     /**
      * Возвращает список всех веток в порядке создания.
@@ -98,19 +107,11 @@ class BranchingStrategy(
         val branches = branchStorage.getBranches()
         if (branches.size >= MAX_BRANCHES) return null
 
-        // Сохраняем текущую активную ветку
-        val activeId = branchStorage.getActiveBranchId()
-        if (activeId != null) {
-            val activeBranch = branches.find { it.id == activeId }
-            if (activeBranch != null) {
-                branchStorage.saveBranch(
-                    activeBranch.copy(
-                        messages = currentHistory,
-                        summaries = currentSummaries
-                    )
-                )
-            }
-        }
+        saveCurrentBranchIfActive(
+            branches = branches,
+            currentHistory = currentHistory,
+            currentSummaries = currentSummaries
+        )
 
         // Создаём новую ветку как копию текущего состояния
         val newBranchNumber = branches.size + 1
@@ -138,19 +139,11 @@ class BranchingStrategy(
     ): DialogBranch? {
         val branches = branchStorage.getBranches()
 
-        // Сохраняем текущую ветку
-        val activeId = branchStorage.getActiveBranchId()
-        if (activeId != null) {
-            val activeBranch = branches.find { it.id == activeId }
-            if (activeBranch != null) {
-                branchStorage.saveBranch(
-                    activeBranch.copy(
-                        messages = currentHistory,
-                        summaries = currentSummaries
-                    )
-                )
-            }
-        }
+        saveCurrentBranchIfActive(
+            branches = branches,
+            currentHistory = currentHistory,
+            currentSummaries = currentSummaries
+        )
 
         branchStorage.setActiveBranch(branchId)
         return branchStorage.getBranches().find { it.id == branchId }
@@ -164,8 +157,28 @@ class BranchingStrategy(
         currentHistory: List<AgentMessage>,
         currentSummaries: List<ConversationSummary>
     ) {
+        saveCurrentBranchIfActive(
+            branches = branchStorage.getBranches(),
+            currentHistory = currentHistory,
+            currentSummaries = currentSummaries
+        )
+    }
+
+    /** Очищает все ветки. */
+    suspend fun clearBranches() = branchStorage.clear()
+
+    // ==================== Private ====================
+
+    /**
+     * Находит активную ветку в [branches] и сохраняет её с [currentHistory] / [currentSummaries].
+     * No-op если активная ветка не задана или не найдена в списке.
+     */
+    private suspend fun saveCurrentBranchIfActive(
+        branches: List<DialogBranch>,
+        currentHistory: List<AgentMessage>,
+        currentSummaries: List<ConversationSummary>
+    ) {
         val activeId = branchStorage.getActiveBranchId() ?: return
-        val branches = branchStorage.getBranches()
         val activeBranch = branches.find { it.id == activeId } ?: return
         branchStorage.saveBranch(
             activeBranch.copy(
@@ -174,9 +187,6 @@ class BranchingStrategy(
             )
         )
     }
-
-    /** Очищает все ветки. */
-    suspend fun clearBranches() = branchStorage.clear()
 
     companion object {
         const val MAX_BRANCHES = 5

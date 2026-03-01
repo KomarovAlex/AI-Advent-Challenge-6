@@ -35,7 +35,7 @@ val AgentMessage.isUser: Boolean
  *                     переопределяет [AgentConfig.defaultSystemPrompt])
  * @param model название модели LLM
  * @param temperature температура генерации (0.0–2.0)
- * @param maxTokens максимальное количество токенов в ответе
+ * @param maxTokens максимальное количество токенов в **ответе** LLM
  * @param stopSequences последовательности для остановки генерации
  */
 data class AgentRequest(
@@ -86,16 +86,25 @@ sealed class AgentStreamEvent {
 }
 
 /**
- * Конфигурация агента
+ * Конфигурация агента.
  *
+ * ### Разделение ответственности полей
+ *
+ * **Параметры LLM-запроса** (передаются в каждый вызов API):
  * @param defaultModel модель по умолчанию
- * @param defaultTemperature температура по умолчанию
- * @param defaultMaxTokens максимум токенов в ответе по умолчанию
+ * @param defaultTemperature температура по умолчанию (0.0–2.0)
+ * @param defaultMaxTokens максимум токенов в **ответе** LLM по умолчанию
  * @param defaultSystemPrompt системный промпт по умолчанию
  * @param defaultStopSequences стоп-последовательности по умолчанию
+ *
+ * **Поведение агента** (управляют историей):
  * @param keepConversationHistory сохранять ли историю диалога внутри агента
- * @param maxHistorySize максимальный размер истории (количество сообщений, null = без ограничения)
- * @param maxTokens максимальный размер истории в токенах (null = без ограничения)
+ * @param maxHistorySize максимальный размер истории в **сообщениях** (null = без ограничения).
+ *   Передаётся в [ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy.truncate]
+ *   как `maxMessages`.
+ * @param maxContextTokens максимальный размер истории в **токенах** (null = без ограничения).
+ *   Передаётся в [ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy.truncate]
+ *   как `maxTokens`. Не путать с [defaultMaxTokens] — тот ограничивает длину ответа, этот — контекст.
  */
 data class AgentConfig(
     val defaultModel: String,
@@ -105,5 +114,5 @@ data class AgentConfig(
     val defaultStopSequences: List<String>? = null,
     val keepConversationHistory: Boolean = true,
     val maxHistorySize: Int? = null,
-    val maxTokens: Int? = null
+    val maxContextTokens: Int? = null
 )

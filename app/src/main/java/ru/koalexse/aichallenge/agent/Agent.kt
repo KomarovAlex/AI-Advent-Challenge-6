@@ -2,12 +2,11 @@ package ru.koalexse.aichallenge.agent
 
 import kotlinx.coroutines.flow.Flow
 import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
-import ru.koalexse.aichallenge.agent.context.facts.Fact
-import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
+import ru.koalexse.aichallenge.agent.context.strategy.BranchingStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
 
 /**
- * Базовый интерфейс агента для работы с LLM
+ * Базовый интерфейс агента для работы с LLM.
  *
  * Агент инкапсулирует логику взаимодействия с языковой моделью,
  * включая формирование запросов, обработку ответов и управление контекстом.
@@ -15,11 +14,26 @@ import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
  * Агент является чистой сущностью без зависимостей на Android фреймворк
  * и может использоваться в любом окружении (Android, CLI, тесты).
  *
- * Контекст диалога, summaries, facts и branches инкапсулированы внутри агента:
- * - история — только через [conversationHistory] (read-only)
- * - summaries — только через [getSummaries] / [loadSummaries]
- * - facts — только через [getFacts] / [refreshFacts] / [loadFacts]
- * - branches — только через [getBranches] / [createCheckpoint] / [switchToBranch]
+ * ### Доступ к возможностям стратегий
+ * Стратегия-специфичные операции не входят в этот интерфейс (ISP).
+ * Используйте приведение типа [truncationStrategy]:
+ *
+ * ```kotlin
+ * // Summaries (SummaryTruncationStrategy):
+ * (agent.truncationStrategy as? SummaryTruncationStrategy)?.getSummaries()
+ * (agent.truncationStrategy as? SummaryTruncationStrategy)?.loadSummaries(list)
+ *
+ * // Facts (StickyFactsStrategy):
+ * (agent.truncationStrategy as? StickyFactsStrategy)?.getFacts()
+ * (agent.truncationStrategy as? StickyFactsStrategy)?.refreshFacts(history)
+ * (agent.truncationStrategy as? StickyFactsStrategy)?.loadFacts(list)
+ *
+ * // Branches (BranchingStrategy):
+ * (agent.truncationStrategy as? BranchingStrategy)?.getBranches()
+ * ```
+ *
+ * Ветки ([initBranches], [createCheckpoint], [switchToBranch]) вынесены в интерфейс,
+ * потому что агент обязан синхронизировать [conversationHistory] с активной веткой.
  */
 interface Agent {
 
@@ -35,55 +49,17 @@ interface Agent {
      */
     val conversationHistory: List<AgentMessage>
 
-    // ==================== Summaries ====================
+    // ==================== Branches ====================
+    // Операции с ветками остаются в интерфейсе Agent, т.к. требуют синхронизации
+    // _context (conversationHistory) с активной веткой — это зона ответственности агента.
+    // Summaries и Facts — чистые I/O операции со стратегией, синхронизации не требуют.
 
     /**
-     * Возвращает список сжатых summaries.
-     * Если стратегия компрессии не установлена — возвращает пустой список.
+     * Инициализирует ветки при старте агента с [BranchingStrategy].
+     * Если ветки не создавались — создаёт первую «Branch 1».
+     * Если активна не [BranchingStrategy] — no-op.
      */
-    suspend fun getSummaries(): List<ConversationSummary>
-
-    /**
-     * Загружает summaries при восстановлении сессии.
-     * Если стратегия компрессии не установлена — игнорирует вызов.
-     */
-    suspend fun loadSummaries(summaries: List<ConversationSummary>)
-
-    // ==================== Facts (StickyFactsStrategy) ====================
-
-    /**
-     * Возвращает текущие факты.
-     * Если активна не [StickyFactsStrategy] — возвращает пустой список.
-     */
-    suspend fun getFacts(): List<Fact>
-
-    /**
-     * Запускает LLM-вызов для обновления фактов на основе текущей истории.
-     * Если активна не [StickyFactsStrategy] — no-op.
-     *
-     * @return обновлённый список фактов
-     */
-    suspend fun refreshFacts(): List<Fact>
-
-    /**
-     * Загружает факты при восстановлении сессии.
-     * Если активна не [StickyFactsStrategy] — игнорирует вызов.
-     */
-    suspend fun loadFacts(facts: List<Fact>)
-
-    // ==================== Branches (BranchingStrategy) ====================
-
-    /**
-     * Возвращает все ветки диалога.
-     * Если активна не [BranchingStrategy] — возвращает пустой список.
-     */
-    suspend fun getBranches(): List<DialogBranch>
-
-    /**
-     * Возвращает id активной ветки.
-     * Если активна не [BranchingStrategy] — возвращает null.
-     */
-    suspend fun getActiveBranchId(): String?
+    suspend fun initBranches()
 
     /**
      * Создаёт checkpoint: сохраняет текущую ветку и создаёт новую ветку-копию.
@@ -103,11 +79,16 @@ interface Agent {
     suspend fun switchToBranch(branchId: String): Boolean
 
     /**
-     * Инициализирует ветки при старте агента с BranchingStrategy.
-     * Если ветки не создавались — создаёт первую «Branch 1».
-     * Если активна не [BranchingStrategy] — no-op.
+     * Возвращает id активной ветки.
+     * Если активна не [BranchingStrategy] — возвращает null.
      */
-    suspend fun initBranches()
+    suspend fun getActiveBranchId(): String?
+
+    /**
+     * Возвращает все ветки диалога.
+     * Если активна не [BranchingStrategy] — возвращает пустой список.
+     */
+    suspend fun getBranches(): List<DialogBranch>
 
     // ==================== Core ====================
 
@@ -127,7 +108,10 @@ interface Agent {
      */
     suspend fun send(message: String): Flow<AgentStreamEvent>
 
-    /** Очищает историю диалога, summaries, facts и branches */
+    /**
+     * Очищает историю диалога и делегирует очистку состояния активной стратегии
+     * через [ContextTruncationStrategy.clear].
+     */
     suspend fun clearHistory()
 
     /**

@@ -35,4 +35,12 @@ interface ContextTruncationStrategy {
      * с любой стратегией через единый интерфейс, без приведения типов.
      */
     suspend fun getAdditionalSystemMessages(): List<AgentMessage> = emptyList()
+
+    /**
+     * Очищает внутреннее состояние стратегии (summaries, facts, branches и т.п.).
+     *
+     * Вызывается агентом при [ru.koalexse.aichallenge.agent.Agent.clearHistory].
+     * По умолчанию — no-op. Стратегии с персистентным состоянием переопределяют.
+     */
+    suspend fun clear() {}
 }

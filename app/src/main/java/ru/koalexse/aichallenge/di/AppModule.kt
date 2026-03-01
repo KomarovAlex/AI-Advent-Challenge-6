@@ -57,6 +57,7 @@ class AppModule(
             defaultSystemPrompt = null,
             defaultStopSequences = listOf("===КОНЕЦ===", "-end-"),
             keepConversationHistory = true,
+            // maxContextTokens намеренно не задан — управляет стратегия
         )
     }
 

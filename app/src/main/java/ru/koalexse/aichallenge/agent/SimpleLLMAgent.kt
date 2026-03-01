@@ -8,12 +8,8 @@ import kotlinx.coroutines.withContext
 import ru.koalexse.aichallenge.agent.context.AgentContext
 import ru.koalexse.aichallenge.agent.context.SimpleAgentContext
 import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
-import ru.koalexse.aichallenge.agent.context.facts.Fact
 import ru.koalexse.aichallenge.agent.context.strategy.BranchingStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
-import ru.koalexse.aichallenge.agent.context.strategy.StickyFactsStrategy
-import ru.koalexse.aichallenge.agent.context.strategy.SummaryTruncationStrategy
-import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
 import ru.koalexse.aichallenge.domain.ApiMessage
 import ru.koalexse.aichallenge.domain.ChatRequest
 import ru.koalexse.aichallenge.domain.StatsStreamResult
@@ -25,12 +21,18 @@ import java.net.SocketTimeoutException
  *
  * Особенности:
  * - Поддерживает стриминговый и полный режим ответа
- * - Инкапсулирует историю, summaries, facts и branches — снаружи только read-only доступ
- * - Поддерживает три стратегии управления контекстом:
- *   - [SlidingWindowStrategy] — скользящее окно
- *   - [StickyFactsStrategy] — ключевые факты из диалога
- *   - [BranchingStrategy] — ветки диалога
+ * - Инкапсулирует историю — снаружи только read-only доступ через [conversationHistory]
+ * - Поддерживает стратегии управления контекстом через [ContextTruncationStrategy]
  * - Не зависит от Android фреймворка
+ *
+ * ### Доступ к возможностям стратегий
+ * Стратегия-специфичные операции (summaries, facts, branches) доступны
+ * через приведение типа [truncationStrategy]:
+ * ```kotlin
+ * (agent.truncationStrategy as? SummaryTruncationStrategy)?.getSummaries()
+ * (agent.truncationStrategy as? StickyFactsStrategy)?.getFacts()
+ * (agent.truncationStrategy as? BranchingStrategy)?.getBranches()
+ * ```
  *
  * ### Потокобезопасность
  * - [_config] и [_truncationStrategy] помечены `@Volatile` — гарантирует видимость
@@ -47,14 +49,14 @@ import java.net.SocketTimeoutException
 class SimpleLLMAgent(
     private val api: StatsLLMApi,
     initialConfig: AgentConfig,
-    agentContext: AgentContext? = null,
+    agentContext: AgentContext = SimpleAgentContext(),
     truncationStrategy: ContextTruncationStrategy? = null
 ) : Agent {
 
     @Volatile
     private var _config: AgentConfig = initialConfig
 
-    private val _context: AgentContext = agentContext ?: SimpleAgentContext()
+    private val _context: AgentContext = agentContext
 
     @Volatile
     private var _truncationStrategy: ContextTruncationStrategy? = truncationStrategy
@@ -68,99 +70,17 @@ class SimpleLLMAgent(
     override val conversationHistory: List<AgentMessage>
         get() = _context.getHistory()
 
-    // ==================== Summaries ====================
-
-    override suspend fun getSummaries(): List<ConversationSummary> {
-        val strategy = _truncationStrategy
-        return if (strategy is SummaryTruncationStrategy) {
-            strategy.getSummaries()
-        } else {
-            emptyList()
-        }
-    }
-
-    override suspend fun loadSummaries(summaries: List<ConversationSummary>) {
-        val strategy = _truncationStrategy
-        if (strategy is SummaryTruncationStrategy) {
-            strategy.loadSummaries(summaries)
-        }
-    }
-
-    // ==================== Facts ====================
-
-    override suspend fun getFacts(): List<Fact> {
-        val strategy = _truncationStrategy
-        return if (strategy is StickyFactsStrategy) strategy.getFacts() else emptyList()
-    }
-
-    override suspend fun refreshFacts(): List<Fact> {
-        val strategy = _truncationStrategy
-        return if (strategy is StickyFactsStrategy) {
-            strategy.refreshFacts(_context.getHistory())
-        } else {
-            emptyList()
-        }
-    }
-
-    override suspend fun loadFacts(facts: List<Fact>) {
-        val strategy = _truncationStrategy
-        if (strategy is StickyFactsStrategy) strategy.loadFacts(facts)
-    }
-
-    // ==================== Branches ====================
-
-    override suspend fun getBranches(): List<DialogBranch> {
-        val strategy = _truncationStrategy
-        return if (strategy is BranchingStrategy) strategy.getBranches() else emptyList()
-    }
-
-    override suspend fun getActiveBranchId(): String? {
-        val strategy = _truncationStrategy
-        return if (strategy is BranchingStrategy) strategy.getActiveBranchId() else null
-    }
-
-    override suspend fun createCheckpoint(): DialogBranch? {
-        val strategy = _truncationStrategy
-        if (strategy !is BranchingStrategy) return null
-        val newBranch = strategy.createCheckpoint(
-            currentHistory = _context.getHistory(),
-            currentSummaries = emptyList()
-        )
-        return newBranch
-    }
-
-    override suspend fun switchToBranch(branchId: String): Boolean {
-        val strategy = _truncationStrategy
-        if (strategy !is BranchingStrategy) return false
-
-        val branch = strategy.switchToBranch(
-            branchId = branchId,
-            currentHistory = _context.getHistory(),
-            currentSummaries = emptyList()
-        ) ?: return false
-
-        _context.replaceHistory(branch.messages)
-        return true
-    }
-
-    override suspend fun initBranches() {
-        val strategy = _truncationStrategy
-        if (strategy !is BranchingStrategy) return
-        val activeId = strategy.ensureInitialized()
-        // Загружаем историю активной ветки
-        val branches = strategy.getBranches()
-        val activeBranch = branches.find { it.id == activeId }
-        if (activeBranch != null && _context.isEmpty) {
-            _context.replaceHistory(activeBranch.messages)
-        }
-    }
-
     // ==================== Core ====================
 
     override suspend fun chat(request: AgentRequest): AgentResponse {
         return withContext(Dispatchers.IO) {
             if (_config.keepConversationHistory) {
-                addMessageWithTruncation(AgentMessage(role = Role.USER, content = request.userMessage))
+                addMessageWithTruncation(
+                    AgentMessage(
+                        role = Role.USER,
+                        content = request.userMessage
+                    )
+                )
             }
             validateRequest(request)
 
@@ -182,7 +102,12 @@ class SimpleLLMAgent(
             val responseContent = responseBuilder.toString()
 
             if (_config.keepConversationHistory) {
-                addMessageWithTruncation(AgentMessage(role = Role.ASSISTANT, content = responseContent))
+                addMessageWithTruncation(
+                    AgentMessage(
+                        role = Role.ASSISTANT,
+                        content = responseContent
+                    )
+                )
             }
 
             AgentResponse(
@@ -204,16 +129,20 @@ class SimpleLLMAgent(
         val responseBuilder = StringBuilder()
 
         return api.sendMessageStream(chatRequest)
-            .map<StatsStreamResult, AgentStreamEvent> { result ->
+            .map { result ->
                 when (result) {
                     is StatsStreamResult.Content -> {
                         responseBuilder.append(result.text)
                         AgentStreamEvent.ContentDelta(result.text)
                     }
+
                     is StatsStreamResult.Stats -> {
                         if (_config.keepConversationHistory && responseBuilder.isNotEmpty()) {
                             addMessageWithTruncation(
-                                AgentMessage(role = Role.ASSISTANT, content = responseBuilder.toString())
+                                AgentMessage(
+                                    role = Role.ASSISTANT,
+                                    content = responseBuilder.toString()
+                                )
                             )
                         }
                         AgentStreamEvent.Completed(
@@ -227,26 +156,23 @@ class SimpleLLMAgent(
     }
 
     override suspend fun send(message: String): Flow<AgentStreamEvent> {
+        // Единственное чтение _config — snapshot для всего вызова
+        val config = _config
         val request = AgentRequest(
             userMessage = message,
-            systemPrompt = _config.defaultSystemPrompt,
-            model = _config.defaultModel,
-            temperature = _config.defaultTemperature,
-            maxTokens = _config.defaultMaxTokens,
-            stopSequences = _config.defaultStopSequences
+            systemPrompt = config.defaultSystemPrompt,
+            model = config.defaultModel,
+            temperature = config.defaultTemperature,
+            maxTokens = config.defaultMaxTokens,
+            stopSequences = config.defaultStopSequences
         )
         return chatStream(request)
     }
 
     override suspend fun clearHistory() {
         _context.clear()
-        val strategy = _truncationStrategy
-        when (strategy) {
-            is SummaryTruncationStrategy -> strategy.clearSummaries()
-            is StickyFactsStrategy -> strategy.clearFacts()
-            is BranchingStrategy -> strategy.clearBranches()
-            else -> Unit
-        }
+        // Делегируем очистку стратегии — не нужно знать её конкретный тип
+        _truncationStrategy?.clear()
     }
 
     override suspend fun addToHistory(message: AgentMessage) {
@@ -269,6 +195,44 @@ class SimpleLLMAgent(
         synchronized(this) { _truncationStrategy = strategy }
     }
 
+    // ==================== Branches (делегирование через cast) ====================
+
+    override suspend fun initBranches() {
+        val strategy = _truncationStrategy as? BranchingStrategy ?: return
+        val activeId = strategy.ensureInitialized()
+        val branches = strategy.getBranches()
+        val activeBranch = branches.find { it.id == activeId }
+        if (activeBranch != null && _context.isEmpty) {
+            _context.replaceHistory(activeBranch.messages)
+        }
+    }
+
+    override suspend fun createCheckpoint(): DialogBranch? {
+        val strategy = _truncationStrategy as? BranchingStrategy ?: return null
+        return strategy.createCheckpoint(
+            currentHistory = _context.getHistory(),
+            currentSummaries = emptyList()
+        )
+    }
+
+    override suspend fun switchToBranch(branchId: String): Boolean {
+        val strategy = _truncationStrategy as? BranchingStrategy ?: return false
+        val branch = strategy.switchToBranch(
+            branchId = branchId,
+            currentHistory = _context.getHistory(),
+            currentSummaries = emptyList()
+        ) ?: return false
+
+        _context.replaceHistory(branch.messages)
+        return true
+    }
+
+    override suspend fun getActiveBranchId(): String? =
+        (_truncationStrategy as? BranchingStrategy)?.getActiveBranchId()
+
+    override suspend fun getBranches(): List<DialogBranch> =
+        (_truncationStrategy as? BranchingStrategy)?.getBranches() ?: emptyList()
+
     // ==================== Private ====================
 
     private suspend fun addMessageWithTruncation(message: AgentMessage) {
@@ -281,10 +245,12 @@ class SimpleLLMAgent(
         val history = _context.getHistory()
         if (history.isEmpty()) return@withContext
 
+        // Snapshot конфига — один раз, для согласованных параметров
+        val config = _config
         val truncated = strategy.truncate(
             messages = history,
-            maxTokens = _config.maxTokens,
-            maxMessages = _config.maxHistorySize
+            maxTokens = config.maxContextTokens,
+            maxMessages = config.maxHistorySize
         )
 
         if (truncated.size != history.size) {
@@ -300,7 +266,7 @@ class SimpleLLMAgent(
             throw AgentException.ValidationError("Model name cannot be blank")
         }
         request.temperature?.let {
-            if (it < 0f || it > 2f) {
+            if (it !in 0f..2f) {
                 throw AgentException.ValidationError("Temperature must be between 0.0 and 2.0")
             }
         }
@@ -355,7 +321,11 @@ class SimpleLLMAgent(
 
     private fun wrapException(e: Throwable): AgentException = when (e) {
         is AgentException -> e
-        is SocketTimeoutException -> AgentException.TimeoutError("Request timed out: ${e.message}", e)
+        is SocketTimeoutException -> AgentException.TimeoutError(
+            "Request timed out: ${e.message}",
+            e
+        )
+
         else -> AgentException.ApiError(message = e.message ?: "Unknown error", cause = e)
     }
 

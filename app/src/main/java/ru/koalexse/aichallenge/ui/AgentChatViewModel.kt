@@ -17,6 +17,8 @@ import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
 import ru.koalexse.aichallenge.agent.context.facts.Fact
 import ru.koalexse.aichallenge.agent.context.strategy.BranchingStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
+import ru.koalexse.aichallenge.agent.context.strategy.StickyFactsStrategy
+import ru.koalexse.aichallenge.agent.context.strategy.SummaryTruncationStrategy
 import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toMessages
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toSession
@@ -97,6 +99,20 @@ class AgentChatViewModel(
         }
         viewModelScope.launch { loadSavedHistory() }
     }
+
+    // ==================== Capability accessors ====================
+
+    /** Доступ к summary-стратегии без знания конкретного типа в остальном коде. */
+    private val summaryStrategy: SummaryTruncationStrategy?
+        get() = agent.truncationStrategy as? SummaryTruncationStrategy
+
+    /** Доступ к facts-стратегии без знания конкретного типа в остальном коде. */
+    private val factsStrategy: StickyFactsStrategy?
+        get() = agent.truncationStrategy as? StickyFactsStrategy
+
+    /** Доступ к branching-стратегии без знания конкретного типа в остальном коде. */
+    private val branchingStrategy: BranchingStrategy?
+        get() = agent.truncationStrategy as? BranchingStrategy
 
     // ==================== UI State ====================
 
@@ -186,7 +202,8 @@ class AgentChatViewModel(
                     }
 
                 is AgentStreamEvent.Completed -> {
-                    val newSummaries = agent.getSummaries()
+                    // Читаем state стратегий через capability accessors
+                    val newSummaries = summaryStrategy?.getSummaries() ?: emptyList()
                     val newBranches  = agent.getBranches()
                     val newActiveId  = agent.getActiveBranchId()
                     _internalState.update { state ->
@@ -262,7 +279,7 @@ class AgentChatViewModel(
      * Применяет смену стратегии:
      * 1. Устанавливаем новую стратегию на агенте (история в контексте сохраняется)
      * 2. Сбрасываем UI-данные предыдущей стратегии
-     * 3. Инициализируем специфичные данные новой стратегии (ветки, факты, summaries)
+     * 3. Инициализируем специфичные данные новой стратегии через capability accessors
      */
     private suspend fun applyStrategyChange(newStrategyType: ContextStrategyType) {
         val factory = strategyFactory ?: return
@@ -297,12 +314,13 @@ class AgentChatViewModel(
             }
 
             ContextStrategyType.STICKY_FACTS -> {
-                val savedFacts = agent.getFacts()
+                // Capability accessor — нет знания о конкретном типе в логике
+                val savedFacts = factsStrategy?.getFacts() ?: emptyList()
                 _internalState.update { it.copy(facts = savedFacts) }
             }
 
             ContextStrategyType.SUMMARY -> {
-                val savedSummaries = agent.getSummaries()
+                val savedSummaries = summaryStrategy?.getSummaries() ?: emptyList()
                 _internalState.update { it.copy(summaries = savedSummaries) }
             }
 
@@ -357,7 +375,8 @@ class AgentChatViewModel(
         _internalState.update { it.copy(isRefreshingFacts = true, error = null) }
         viewModelScope.launch {
             try {
-                val updatedFacts = agent.refreshFacts()
+                val updatedFacts = factsStrategy?.refreshFacts(agent.conversationHistory)
+                    ?: emptyList()
                 _internalState.update { it.copy(facts = updatedFacts, isRefreshingFacts = false) }
                 saveHistory()
             } catch (e: Exception) {
@@ -451,7 +470,9 @@ class AgentChatViewModel(
                 sessionCreatedAt = session.createdAt
 
                 val savedSummaries = session.toSummaries()
-                if (savedSummaries.isNotEmpty()) agent.loadSummaries(savedSummaries)
+                if (savedSummaries.isNotEmpty()) {
+                    summaryStrategy?.loadSummaries(savedSummaries)
+                }
 
                 session.toMessages().forEach { agent.addToHistory(it) }
 
@@ -472,7 +493,8 @@ class AgentChatViewModel(
                 }
             }
 
-            val savedFacts = agent.getFacts()
+            // Загружаем факты через capability accessor
+            val savedFacts = factsStrategy?.getFacts() ?: emptyList()
             if (savedFacts.isNotEmpty()) {
                 _internalState.update { it.copy(facts = savedFacts) }
             }
@@ -500,13 +522,10 @@ class AgentChatViewModel(
         if (chatHistoryRepository == null) return
 
         if (_internalState.value.activeStrategy == ContextStrategyType.BRANCHING) {
-            val strategy = agent.truncationStrategy
-            if (strategy is BranchingStrategy) {
-                strategy.saveActiveBranch(
-                    currentHistory   = agent.conversationHistory,
-                    currentSummaries = emptyList()
-                )
-            }
+            branchingStrategy?.saveActiveBranch(
+                currentHistory   = agent.conversationHistory,
+                currentSummaries = emptyList()
+            )
             return
         }
 
@@ -519,7 +538,7 @@ class AgentChatViewModel(
                 model        = agent.config.defaultModel,
                 createdAt    = sessionCreatedAt,
                 sessionStats = _internalState.value.sessionStats.takeIf { it.messageCount > 0 },
-                summaries    = agent.getSummaries()
+                summaries    = summaryStrategy?.getSummaries() ?: emptyList()
             )
             chatHistoryRepository.saveSession(session)
             chatHistoryRepository.setActiveSession(currentSessionId)
