@@ -217,12 +217,12 @@ class AgentChatViewModel(
                     }
 
                 is AgentStreamEvent.Completed -> {
-                    // Читаем state стратегий через capability accessors
                     val newSummaries = summaryStrategy?.getSummaries() ?: emptyList()
                     val newBranches  = agent.getBranches()
                     val newActiveId  = agent.getActiveBranchId()
-                    // После каждого ответа синхронизируем compressed-сообщения StickyFacts —
-                    // truncate() мог добавить новые вытесненные сообщения в factsStorage
+                    // Синхронизируем факты и compressed — truncate() внутри агента мог
+                    // запустить авторефреш фактов и добавить новые compressed-сообщения
+                    val newFacts           = factsStrategy?.getFacts() ?: emptyList()
                     val newFactsCompressed = factsStrategy?.getCompressedMessages() ?: emptyList()
                     _internalState.update { state ->
                         state.copy(
@@ -230,11 +230,12 @@ class AgentChatViewModel(
                                 tokenStats = event.tokenStats,
                                 responseDurationMs = event.durationMs
                             ),
-                            sessionStats = state.sessionStats.add(event.tokenStats),
-                            summaries = newSummaries,
+                            sessionStats           = state.sessionStats.add(event.tokenStats),
+                            summaries              = newSummaries,
+                            facts                  = newFacts,
                             factsCompressedMessages = newFactsCompressed,
-                            branches = newBranches,
-                            activeBranchId = newActiveId
+                            branches               = newBranches,
+                            activeBranchId         = newActiveId
                         )
                     }
                 }
@@ -334,7 +335,6 @@ class AgentChatViewModel(
             }
 
             ContextStrategyType.STICKY_FACTS -> {
-                // Capability accessor — нет знания о конкретном типе в логике
                 val savedFacts = factsStrategy?.getFacts() ?: emptyList()
                 val savedCompressed = factsStrategy?.getCompressedMessages() ?: emptyList()
                 _internalState.update {
@@ -406,7 +406,6 @@ class AgentChatViewModel(
                 // вытесненные уже в factsStorage и учтены в существующих фактах
                 val updatedFacts = factsStrategy?.refreshFacts(agent.conversationHistory)
                     ?: emptyList()
-                // Compressed-сообщения не меняются при refresh — читаем актуальные
                 val compressed = factsStrategy?.getCompressedMessages() ?: emptyList()
                 _internalState.update {
                     it.copy(

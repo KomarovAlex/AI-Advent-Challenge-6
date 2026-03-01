@@ -80,7 +80,9 @@ class AppModule(
         ContextStrategyType.STICKY_FACTS -> StickyFactsStrategy(
             api = statsLLMApi,
             factsStorage = JsonFactsStorage(context),
-            factsModel = defaultModel
+            factsModel = defaultModel,
+            // autoRefreshThreshold = 2 (по умолчанию) — один полный обмен user+assistant.
+            // Увеличьте если хотите реже обновлять факты (экономия токенов).
         )
 
         ContextStrategyType.BRANCHING -> BranchingStrategy(
