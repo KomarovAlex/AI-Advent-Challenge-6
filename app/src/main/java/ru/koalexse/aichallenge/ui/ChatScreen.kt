@@ -42,6 +42,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -53,6 +54,7 @@ import ru.koalexse.aichallenge.domain.Message
 import ru.koalexse.aichallenge.domain.SessionTokenStats
 import ru.koalexse.aichallenge.domain.TokenStats
 import ru.koalexse.aichallenge.ui.state.ChatUiState
+import ru.koalexse.aichallenge.ui.state.ContextStrategyType
 import ru.koalexse.aichallenge.ui.state.SettingsData
 
 @OptIn(FlowPreview::class)
@@ -110,6 +112,7 @@ fun ChatScreen(
         }
 
         SessionStatsFooter(
+            uiState = currentUiState,
             sessionStats = sessionStats,
             compressedMessageCount = compressedMessageCount
         )
@@ -145,16 +148,41 @@ fun ChatScreen(
 
 @Composable
 private fun SessionStatsFooter(
+    uiState: ChatUiState,
     sessionStats: SessionTokenStats?,
     compressedMessageCount: Int,
     modifier: Modifier = Modifier
 ) {
-    if (sessionStats != null || compressedMessageCount > 0) {
+    val hasBranchInfo = uiState.activeStrategy == ContextStrategyType.BRANCHING &&
+            uiState.activeBranchId != null
+
+    val activeBranchName = if (hasBranchInfo) {
+        uiState.branches.find { it.id == uiState.activeBranchId }?.name
+    } else null
+
+    val hasContent = sessionStats != null || compressedMessageCount > 0 || activeBranchName != null
+
+    if (hasContent) {
         Column(modifier = modifier.fillMaxWidth()) {
             HorizontalDivider(
                 modifier = Modifier.padding(bottom = 4.dp),
                 color = MaterialTheme.colorScheme.outlineVariant
             )
+
+            // Индикатор активной ветки
+            if (activeBranchName != null) {
+                Text(
+                    text = stringResource(
+                        R.string.branch_stats_format,
+                        activeBranchName,
+                        uiState.branches.size
+                    ),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(horizontal = 4.dp)
+                )
+            }
 
             if (sessionStats != null) {
                 Text(
@@ -197,7 +225,10 @@ private fun MessageList(
         reverseLayout = true
     ) {
         items(messageList, key = { it.id }) { message ->
-            if (message.isCompressed) {
+            // facts_bubble — специальный стиль с меткой 📌
+            if (message.id == "facts_bubble") {
+                FactsBubble(text = message.text)
+            } else if (message.isCompressed) {
                 CompressedMessageBubble(
                     isUser = message.isUser,
                     text = message.text
@@ -258,6 +289,43 @@ private fun ErrorDialog(error: String, onDismiss: () -> Unit) {
             }
         }
     )
+}
+
+/**
+ * Специальный бабл для отображения текущих фактов (StickyFacts-стратегия).
+ * Фиксируется в начале ленты, выглядит как системное сообщение.
+ */
+@Composable
+private fun FactsBubble(text: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            shape = RoundedCornerShape(8.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.tertiaryContainer
+            )
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Text(
+                    text = stringResource(R.string.facts_bubble_label),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = text,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+            }
+        }
+    }
 }
 
 /**
@@ -353,7 +421,6 @@ private fun CompressedMessageBubble(
             )
         ) {
             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
-                // Метка "сжато"
                 Text(
                     text = stringResource(R.string.compressed_message_label),
                     fontSize = 10.sp,
@@ -378,6 +445,7 @@ fun ChatScreenPreview() {
         mutableStateOf(
             ChatUiState(
                 messages = listOf(
+                    Message("facts_bubble", false, "• цель: написать приложение\n• язык: Kotlin", isCompressed = true),
                     Message("c1", true, "Старое сообщение 1", isCompressed = true),
                     Message("c2", false, "Старый ответ ассистента", isCompressed = true),
                     Message("1", true, "Hello, how are you?"),
@@ -390,7 +458,8 @@ fun ChatScreenPreview() {
                 ),
                 settingsData = SettingsData("deepseek-v3.2"),
                 sessionStats = SessionTokenStats(250, 120, 370, 1),
-                compressedMessageCount = 2
+                compressedMessageCount = 2,
+                activeStrategy = ContextStrategyType.STICKY_FACTS
             )
         )
     }) { }
