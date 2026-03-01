@@ -3,10 +3,7 @@ package ru.koalexse.aichallenge.agent.context.summary
 import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -25,16 +22,24 @@ private data class SummaryStorageData(
 }
 
 /**
- * JSON-реализация хранилища summaries
- * 
+ * JSON-реализация хранилища summaries.
+ *
  * Хранит summaries в JSON-файле в приватной директории приложения.
- * Все операции потокобезопасны благодаря использованию Mutex.
- * 
- * Особенности:
- * - Данные кэшируются в памяти для быстрого чтения
- * - Запись на диск происходит асинхронно для неблокирующего добавления
- * - При первом обращении данные загружаются с диска
- * 
+ * Все операции потокобезопасны через [Mutex].
+ *
+ * ### Гарантии согласованности
+ * Мутация кэша и запись на диск выполняются **внутри одного** `mutex.withLock` —
+ * гонка между несколькими вызовами невозможна, потеря данных исключена.
+ * Этот же паттерн используется в [JsonFactsStorage] и [JsonBranchStorage].
+ *
+ * ```
+ * addSummary / clear / loadSummaries
+ *   └─ mutex.withLock {
+ *        изменить cachedSummaries
+ *        withContext(IO) { file.writeText(...) }   ← атомарно с изменением
+ *      }
+ * ```
+ *
  * @param context контекст приложения
  * @param fileName имя файла для хранения (по умолчанию "summaries.json")
  */
@@ -42,127 +47,97 @@ class JsonSummaryStorage(
     private val context: Context,
     private val fileName: String = "summaries.json"
 ) : SummaryStorage {
-    
+
     private val mutex = Mutex()
     private val gson: Gson = GsonBuilder()
         .setPrettyPrinting()
         .create()
-    
+
     private val file: File
         get() = File(context.filesDir, fileName)
-    
-    // Кэш данных в памяти для быстрого доступа
+
+    // Кэш данных в памяти для быстрого чтения
     private var cachedSummaries: MutableList<ConversationSummary>? = null
-    
-    // Scope для асинхронной записи
-    private val writeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    
+
     override suspend fun getSummaries(): List<ConversationSummary> {
         return mutex.withLock {
             ensureLoadedInternal()
             cachedSummaries?.toList() ?: emptyList()
         }
     }
-    
+
     override suspend fun addSummary(summary: ConversationSummary) {
         mutex.withLock {
             ensureLoadedInternal()
-            if (cachedSummaries == null) {
-                cachedSummaries = mutableListOf()
-            }
             cachedSummaries!!.add(summary)
+            saveLocked()
         }
-        // Асинхронно сохраняем на диск
-        scheduleWrite()
     }
-    
+
     override suspend fun clear() {
         mutex.withLock {
-            cachedSummaries?.clear()
             cachedSummaries = mutableListOf()
+            saveLocked()
         }
-        // Асинхронно сохраняем на диск
-        scheduleWrite()
     }
-    
+
     override suspend fun getSize(): Int {
         return mutex.withLock {
             ensureLoadedInternal()
             cachedSummaries?.size ?: 0
         }
     }
-    
+
     override suspend fun isEmpty(): Boolean {
         return mutex.withLock {
             ensureLoadedInternal()
             cachedSummaries?.isEmpty() ?: true
         }
     }
-    
+
     override suspend fun loadSummaries(summaries: List<ConversationSummary>) {
         mutex.withLock {
             cachedSummaries = summaries.toMutableList()
+            saveLocked()
         }
-        // Асинхронно сохраняем на диск
-        scheduleWrite()
     }
-    
+
+    // ==================== Private ====================
+
     /**
-     * Загружает данные с диска, если ещё не загружены
-     * Должен вызываться внутри mutex.withLock
+     * Загружает данные с диска, если кэш ещё не инициализирован.
+     * Должен вызываться внутри [mutex].
      */
     private suspend fun ensureLoadedInternal() {
         if (cachedSummaries != null) return
-        
         withContext(Dispatchers.IO) {
-            try {
+            cachedSummaries = try {
                 if (file.exists()) {
-                    val json = file.readText()
-                    val data = gson.fromJson(json, SummaryStorageData::class.java)
-                    cachedSummaries = data?.summaries?.toMutableList() ?: mutableListOf()
+                    val data = gson.fromJson(file.readText(), SummaryStorageData::class.java)
+                    data?.summaries?.toMutableList() ?: mutableListOf()
                 } else {
-                    cachedSummaries = mutableListOf()
+                    mutableListOf()
                 }
-            } catch (e: Exception) {
-                // В случае ошибки парсинга начинаем с пустого списка
-                cachedSummaries = mutableListOf()
+            } catch (_: Exception) {
+                // При ошибке парсинга начинаем с пустого списка
+                mutableListOf()
             }
         }
     }
-    
+
     /**
-     * Планирует асинхронную запись на диск
+     * Сохраняет текущий кэш на диск.
+     * Должен вызываться внутри [mutex] — snapshot и запись атомарны по отношению
+     * к другим мутациям кэша, гонка между конкурентными вызовами невозможна.
      */
-    private fun scheduleWrite() {
-        writeScope.launch {
-            saveToDisk()
-        }
-    }
-    
-    /**
-     * Сохраняет данные на диск
-     */
-    private suspend fun saveToDisk() {
-        val summariesToSave = mutex.withLock {
-            cachedSummaries?.toList() ?: emptyList()
-        }
-        
+    private suspend fun saveLocked() {
+        val snapshot = cachedSummaries?.toList() ?: emptyList()
         withContext(Dispatchers.IO) {
             try {
-                val data = SummaryStorageData(summaries = summariesToSave)
-                val json = gson.toJson(data)
-                file.writeText(json)
-            } catch (e: Exception) {
-                // Логируем ошибку (в реальном приложении)
+                file.writeText(gson.toJson(SummaryStorageData(summaries = snapshot)))
+            } catch (_: Exception) {
                 // Не бросаем исключение, чтобы не ломать UX
             }
         }
-    }
-    
-    /**
-     * Принудительно сохраняет данные на диск (асинхронно)
-     */
-    suspend fun flush() {
-        saveToDisk()
     }
 }
