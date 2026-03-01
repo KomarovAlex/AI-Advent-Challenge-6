@@ -8,6 +8,10 @@ import ru.koalexse.aichallenge.agent.SimpleLLMAgent
 import ru.koalexse.aichallenge.agent.StatsLLMApi
 import ru.koalexse.aichallenge.agent.buildAgent
 import ru.koalexse.aichallenge.agent.context.SimpleAgentContext
+import ru.koalexse.aichallenge.agent.context.strategy.BranchingStrategy
+import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
+import ru.koalexse.aichallenge.agent.context.strategy.SlidingWindowStrategy
+import ru.koalexse.aichallenge.agent.context.strategy.StickyFactsStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.SummaryTruncationStrategy
 import ru.koalexse.aichallenge.agent.context.summary.JsonSummaryStorage
 import ru.koalexse.aichallenge.agent.context.summary.LLMSummaryProvider
@@ -17,8 +21,11 @@ import ru.koalexse.aichallenge.data.LLMApi
 import ru.koalexse.aichallenge.data.OpenAIApi
 import ru.koalexse.aichallenge.data.StatsTrackingLLMApi
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryRepository
+import ru.koalexse.aichallenge.data.persistence.JsonBranchStorage
 import ru.koalexse.aichallenge.data.persistence.JsonChatHistoryRepository
+import ru.koalexse.aichallenge.data.persistence.JsonFactsStorage
 import ru.koalexse.aichallenge.ui.AgentChatViewModel
+import ru.koalexse.aichallenge.ui.state.ContextStrategyType
 
 /**
  * Простой модуль зависимостей без использования DI-фреймворков.
@@ -27,7 +34,7 @@ import ru.koalexse.aichallenge.ui.AgentChatViewModel
  *   UI → Agent → domain
  *   UI → data  → domain
  *   data реализует agent.StatsLLMApi  ✅
- *   ViewModel не знает о SummaryStorage — только об Agent ✅
+ *   ViewModel не знает о SummaryStorage / FactsStorage / BranchStorage — только об Agent ✅
  */
 class AppModule(
     private val context: Context,
@@ -37,14 +44,10 @@ class AppModule(
     private val defaultModel: String = availableModels.firstOrNull() ?: "gpt-4"
 ) {
 
-    val llmApi: LLMApi by lazy {
-        OpenAIApi(apiKey, baseUrl)
-    }
+    val llmApi: LLMApi by lazy { OpenAIApi(apiKey, baseUrl) }
 
     /** Реализует [StatsLLMApi] из agent/ — инверсия зависимости. */
-    val statsLLMApi: StatsLLMApi by lazy {
-        StatsTrackingLLMApi(llmApi)
-    }
+    val statsLLMApi: StatsLLMApi by lazy { StatsTrackingLLMApi(llmApi) }
 
     val agentConfig: AgentConfig by lazy {
         AgentConfig(
@@ -57,27 +60,70 @@ class AppModule(
         )
     }
 
-    val agent: Agent by lazy {
-        AgentFactory.createAgentWithStats(statsLLMApi, agentConfig)
-    }
-
     val chatHistoryRepository: ChatHistoryRepository by lazy {
         JsonChatHistoryRepository(context)
     }
 
-    // ==================== Фабричные методы ====================
+    // ==================== Фабрика стратегий ====================
 
-    fun createAgentChatViewModel(): AgentChatViewModel {
+    /**
+     * Создаёт экземпляр стратегии по типу.
+     *
+     * Вызывается ViewModel при смене стратегии через настройки.
+     * Каждый вызов создаёт **новый** экземпляр со свежими storage-объектами,
+     * чтобы не смешивать данные разных стратегий.
+     */
+    fun buildStrategy(type: ContextStrategyType): ContextTruncationStrategy? = when (type) {
+        ContextStrategyType.SLIDING_WINDOW -> SlidingWindowStrategy()
+
+        ContextStrategyType.STICKY_FACTS -> StickyFactsStrategy(
+            api = statsLLMApi,
+            factsStorage = JsonFactsStorage(context),
+            factsModel = defaultModel
+        )
+
+        ContextStrategyType.BRANCHING -> BranchingStrategy(
+            branchStorage = JsonBranchStorage(context)
+        )
+
+        ContextStrategyType.SUMMARY -> SummaryTruncationStrategy(
+            summaryProvider = LLMSummaryProvider(api = statsLLMApi, model = defaultModel),
+            summaryStorage = JsonSummaryStorage(context)
+        )
+    }
+
+    // ==================== Фабричные методы ViewModel ====================
+
+    /**
+     * Основной метод создания ViewModel.
+     * Стратегия задаётся через [initialStrategyType] и может меняться
+     * пользователем прямо в настройках — агент пересоздаётся не нужен,
+     * достаточно вызова [Agent.updateTruncationStrategy].
+     *
+     * [strategyFactory] передаётся во ViewModel, чтобы та могла создавать
+     * новые стратегии при смене без зависимости на Android-контекст напрямую.
+     */
+    fun createAgentChatViewModel(
+        initialStrategyType: ContextStrategyType = ContextStrategyType.SUMMARY
+    ): AgentChatViewModel {
+        val initialStrategy = buildStrategy(initialStrategyType)
+        val agent = SimpleLLMAgent(
+            api = statsLLMApi,
+            initialConfig = agentConfig,
+            agentContext = SimpleAgentContext(),
+            truncationStrategy = initialStrategy
+        )
         return AgentChatViewModel(
             agent = agent,
             availableModels = availableModels,
-            chatHistoryRepository = chatHistoryRepository
+            chatHistoryRepository = chatHistoryRepository,
+            initialStrategy = initialStrategyType,
+            strategyFactory = ::buildStrategy
         )
     }
 
     /**
-     * Создаёт ViewModel с агентом, у которого включена компрессия истории.
-     * SummaryStorage инкапсулирован внутри агента — ViewModel о нём не знает.
+     * Создаёт ViewModel с Summary-стратегией (обратная совместимость с MainActivity).
      */
     fun createAgentChatViewModelWithCompression(
         keepRecentCount: Int = 10,
@@ -90,27 +136,28 @@ class AppModule(
         } else {
             SimpleSummaryProvider()
         }
-
         val truncationStrategy = SummaryTruncationStrategy(
             summaryProvider = summaryProvider,
             summaryStorage = JsonSummaryStorage(context),
             keepRecentCount = keepRecentCount,
             summaryBlockSize = summaryBlockSize
         )
-
-        val agentWithCompression = SimpleLLMAgent(
+        val agent = SimpleLLMAgent(
             api = statsLLMApi,
             initialConfig = agentConfig,
             agentContext = SimpleAgentContext(),
             truncationStrategy = truncationStrategy
         )
-
         return AgentChatViewModel(
-            agent = agentWithCompression,
+            agent = agent,
             availableModels = availableModels,
-            chatHistoryRepository = chatHistoryRepository
+            chatHistoryRepository = chatHistoryRepository,
+            initialStrategy = ContextStrategyType.SUMMARY,
+            strategyFactory = ::buildStrategy
         )
     }
+
+    // ==================== Прочее ====================
 
     fun createAgentWithBuilder(block: AgentBuilderScope.() -> Unit): Agent {
         val scope = AgentBuilderScope()
@@ -125,6 +172,11 @@ class AppModule(
             keepHistory(scope.keepHistory)
             scope.maxHistorySize?.let { maxHistorySize(it) }
         }
+    }
+
+    /** Создаёт агента без фабричного метода ViewModel — для builder DSL. */
+    val agent: Agent by lazy {
+        AgentFactory.createAgentWithStats(statsLLMApi, agentConfig)
     }
 
     class AgentBuilderScope {

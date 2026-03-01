@@ -7,7 +7,11 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import ru.koalexse.aichallenge.agent.context.AgentContext
 import ru.koalexse.aichallenge.agent.context.SimpleAgentContext
+import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
+import ru.koalexse.aichallenge.agent.context.facts.Fact
+import ru.koalexse.aichallenge.agent.context.strategy.BranchingStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
+import ru.koalexse.aichallenge.agent.context.strategy.StickyFactsStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.SummaryTruncationStrategy
 import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
 import ru.koalexse.aichallenge.domain.ApiMessage
@@ -21,10 +25,11 @@ import java.net.SocketTimeoutException
  *
  * Особенности:
  * - Поддерживает стриминговый и полный режим ответа
- * - Инкапсулирует историю и summaries — снаружи только read-only доступ
- * - Поддерживает компрессию истории через [ContextTruncationStrategy]
- * - Получает дополнительные системные сообщения от стратегии через интерфейс —
- *   без приведения типов
+ * - Инкапсулирует историю, summaries, facts и branches — снаружи только read-only доступ
+ * - Поддерживает три стратегии управления контекстом:
+ *   - [SlidingWindowStrategy] — скользящее окно
+ *   - [StickyFactsStrategy] — ключевые факты из диалога
+ *   - [BranchingStrategy] — ветки диалога
  * - Не зависит от Android фреймворка
  *
  * ### Потокобезопасность
@@ -32,8 +37,7 @@ import java.net.SocketTimeoutException
  *   изменений между потоками без блокировки при чтении в suspend-функциях.
  * - Запись защищена `synchronized` только в не-suspend методах [updateConfig] и
  *   [updateTruncationStrategy], где приостановки корутины невозможны.
- * - [_context] ([SimpleAgentContext]) использует `synchronized` внутри, что безопасно,
- *   так как его методы синхронные и не содержат suspend-точек.
+ * - [_context] ([SimpleAgentContext]) использует `synchronized` внутри.
  *
  * @param api интерфейс для работы с LLM API
  * @param initialConfig начальная конфигурация агента
@@ -82,7 +86,76 @@ class SimpleLLMAgent(
         }
     }
 
-    // ==================== Публичные методы ====================
+    // ==================== Facts ====================
+
+    override suspend fun getFacts(): List<Fact> {
+        val strategy = _truncationStrategy
+        return if (strategy is StickyFactsStrategy) strategy.getFacts() else emptyList()
+    }
+
+    override suspend fun refreshFacts(): List<Fact> {
+        val strategy = _truncationStrategy
+        return if (strategy is StickyFactsStrategy) {
+            strategy.refreshFacts(_context.getHistory())
+        } else {
+            emptyList()
+        }
+    }
+
+    override suspend fun loadFacts(facts: List<Fact>) {
+        val strategy = _truncationStrategy
+        if (strategy is StickyFactsStrategy) strategy.loadFacts(facts)
+    }
+
+    // ==================== Branches ====================
+
+    override suspend fun getBranches(): List<DialogBranch> {
+        val strategy = _truncationStrategy
+        return if (strategy is BranchingStrategy) strategy.getBranches() else emptyList()
+    }
+
+    override suspend fun getActiveBranchId(): String? {
+        val strategy = _truncationStrategy
+        return if (strategy is BranchingStrategy) strategy.getActiveBranchId() else null
+    }
+
+    override suspend fun createCheckpoint(): DialogBranch? {
+        val strategy = _truncationStrategy
+        if (strategy !is BranchingStrategy) return null
+        val newBranch = strategy.createCheckpoint(
+            currentHistory = _context.getHistory(),
+            currentSummaries = emptyList()
+        )
+        return newBranch
+    }
+
+    override suspend fun switchToBranch(branchId: String): Boolean {
+        val strategy = _truncationStrategy
+        if (strategy !is BranchingStrategy) return false
+
+        val branch = strategy.switchToBranch(
+            branchId = branchId,
+            currentHistory = _context.getHistory(),
+            currentSummaries = emptyList()
+        ) ?: return false
+
+        _context.replaceHistory(branch.messages)
+        return true
+    }
+
+    override suspend fun initBranches() {
+        val strategy = _truncationStrategy
+        if (strategy !is BranchingStrategy) return
+        val activeId = strategy.ensureInitialized()
+        // Загружаем историю активной ветки
+        val branches = strategy.getBranches()
+        val activeBranch = branches.find { it.id == activeId }
+        if (activeBranch != null && _context.isEmpty) {
+            _context.replaceHistory(activeBranch.messages)
+        }
+    }
+
+    // ==================== Core ====================
 
     override suspend fun chat(request: AgentRequest): AgentResponse {
         return withContext(Dispatchers.IO) {
@@ -168,8 +241,11 @@ class SimpleLLMAgent(
     override suspend fun clearHistory() {
         _context.clear()
         val strategy = _truncationStrategy
-        if (strategy is SummaryTruncationStrategy) {
-            strategy.clearSummaries()
+        when (strategy) {
+            is SummaryTruncationStrategy -> strategy.clearSummaries()
+            is StickyFactsStrategy -> strategy.clearFacts()
+            is BranchingStrategy -> strategy.clearBranches()
+            else -> Unit
         }
     }
 
@@ -193,7 +269,7 @@ class SimpleLLMAgent(
         synchronized(this) { _truncationStrategy = strategy }
     }
 
-    // ==================== Приватные методы ====================
+    // ==================== Private ====================
 
     private suspend fun addMessageWithTruncation(message: AgentMessage) {
         _context.addMessage(message)
@@ -250,12 +326,9 @@ class SimpleLLMAgent(
      *
      * Структура:
      * 1. System prompt (если есть)
-     * 2. Дополнительные системные сообщения от стратегии (например, summary)
+     * 2. Дополнительные системные сообщения от стратегии (summary / facts)
      * 3a. keepConversationHistory=true  → _context.getHistory() (уже включает userMessage)
      * 3b. keepConversationHistory=false → только текущий userMessage
-     *
-     * Стратегия вызывается через интерфейс [ContextTruncationStrategy.getAdditionalSystemMessages]
-     * — без приведения типов.
      */
     private suspend fun buildMessageList(request: AgentRequest): List<ApiMessage> {
         val messages = mutableListOf<ApiMessage>()
@@ -266,7 +339,7 @@ class SimpleLLMAgent(
             messages.add(ApiMessage(role = "system", content = systemPrompt))
         }
 
-        // 2. Дополнительные системные сообщения от стратегии (summary и т.п.)
+        // 2. Дополнительные системные сообщения от стратегии (summary, facts и т.п.)
         _truncationStrategy?.getAdditionalSystemMessages()
             ?.forEach { msg -> messages.add(msg.toApiMessage()) }
 
