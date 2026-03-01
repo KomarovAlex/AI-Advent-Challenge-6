@@ -35,6 +35,29 @@
 - `Mutex` вместо `synchronized` в suspend-функциях
 - Нет `runBlocking` в suspend-функциях
 
+### Потокобезопасность в агенте
+- `@Volatile` на полях, которые читаются в suspend и пишутся редко (`_config`, `_truncationStrategy`)
+- `synchronized` — только в **не-suspend** методах (`updateConfig`, `updateTruncationStrategy`)
+- `synchronized` в suspend — **запрещено**: блокирует поток при приостановке корутины
+
+```kotlin
+// ✅ Правильно
+@Volatile private var _config: AgentConfig = initialConfig
+override fun updateConfig(newConfig: AgentConfig) {          // не suspend
+    synchronized(this) { _config = newConfig }
+}
+
+// ❌ Неправильно — suspend + synchronized
+override suspend fun bad() { synchronized(this) { withContext(IO) { ... } } }
+```
+
+### Стратегии обрезки контекста
+- Все стратегии реализуют `ContextTruncationStrategy`
+- `getAdditionalSystemMessages()` — переопределить, если стратегия добавляет системные
+  сообщения в LLM-запрос (например, summary). По умолчанию `emptyList()`
+- Общая логика обрезки по токенам — `TruncationUtils.truncateByTokens()`, не дублировать
+- Общий estimator — `TokenEstimators.default`, передавать через `TokenEstimator`
+
 ### Именование
 - `Repository` — репозитории
 - `ViewModel` — вьюмодели
@@ -73,8 +96,9 @@ di/  → все
 - Не блокировать main thread — IO на `Dispatchers.IO`
 - Не использовать `runBlocking` в suspend-функциях
 - Не включать `originalMessages` в LLM-запрос — только `content` из summary
-- Не использовать `synchronized` в suspend-функциях — только `Mutex`
+- Не использовать `synchronized` в suspend-функциях — только `@Volatile` для чтения
 - Не дублировать `userMessage` в `buildMessageList` — он уже в `_context` при `keepConversationHistory=true`
+- Не дублировать `truncateByTokens` в стратегиях — использовать `TruncationUtils`
 
 ---
 

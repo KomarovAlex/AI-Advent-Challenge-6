@@ -4,99 +4,52 @@ import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.Role
 
 /**
- * Стратегия обрезки, сохраняющая системные сообщения
- * 
- * При обрезке истории системные сообщения (role = SYSTEM) всегда сохраняются в начале.
- * Удаляются только сообщения USER и ASSISTANT, начиная с самых старых.
- * 
- * Это полезно для сохранения важных инструкций и настроек поведения агента.
- * 
- * @param tokenEstimator функция для оценки количества токенов в сообщении
+ * Стратегия обрезки, сохраняющая системные сообщения.
+ *
+ * При обрезке системные сообщения (role = SYSTEM) всегда сохраняются.
+ * Удаляются только USER и ASSISTANT, начиная с самых старых.
+ *
+ * Полезна для сохранения важных инструкций и настроек поведения агента,
+ * которые хранятся непосредственно в истории (не в конфиге).
+ *
+ * @param tokenEstimator функция оценки токенов. По умолчанию — [TokenEstimators.default].
  */
 class PreserveSystemTruncationStrategy(
-    private val tokenEstimator: (AgentMessage) -> Int = { message ->
-        (message.content.length / 4).coerceAtLeast(1)
-    }
+    private val tokenEstimator: TokenEstimator = TokenEstimators.default
 ) : ContextTruncationStrategy {
-    
+
     override suspend fun truncate(
         messages: List<AgentMessage>,
         maxTokens: Int?,
         maxMessages: Int?
     ): List<AgentMessage> {
         if (messages.isEmpty()) return messages
-        
-        // Разделяем системные и обычные сообщения
+
         val systemMessages = messages.filter { it.role == Role.SYSTEM }
         val nonSystemMessages = messages.filter { it.role != Role.SYSTEM }
-        
+
         var truncatedNonSystem = nonSystemMessages
-        
-        // Ограничиваем по количеству сообщений (не считая системные)
+
         if (maxMessages != null) {
-            val maxNonSystemMessages = (maxMessages - systemMessages.size).coerceAtLeast(0)
-            if (truncatedNonSystem.size > maxNonSystemMessages) {
-                truncatedNonSystem = truncatedNonSystem.takeLast(maxNonSystemMessages)
+            val maxNonSystem = (maxMessages - systemMessages.size).coerceAtLeast(0)
+            if (truncatedNonSystem.size > maxNonSystem) {
+                truncatedNonSystem = truncatedNonSystem.takeLast(maxNonSystem)
             }
         }
-        
-        // Ограничиваем по токенам
+
         if (maxTokens != null) {
             val systemTokens = systemMessages.sumOf { tokenEstimator(it) }
             val availableTokens = (maxTokens - systemTokens).coerceAtLeast(0)
-            truncatedNonSystem = truncateByTokens(truncatedNonSystem, availableTokens)
+            truncatedNonSystem = TruncationUtils.truncateByTokens(
+                messages = truncatedNonSystem,
+                maxTokens = availableTokens,
+                estimator = tokenEstimator
+            )
         }
-        
-        // Собираем результат: системные сообщения + обрезанные обычные
-        // Сохраняем порядок системных сообщений относительно их позиций
-        return buildResultPreservingOrder(messages, systemMessages, truncatedNonSystem)
-    }
-    
-    /**
-     * Собирает результат, сохраняя относительный порядок сообщений
-     */
-    private fun buildResultPreservingOrder(
-        original: List<AgentMessage>,
-        systemMessages: List<AgentMessage>,
-        truncatedNonSystem: List<AgentMessage>
-    ): List<AgentMessage> {
+
+        // Восстанавливаем порядок: системные сообщения сохраняют исходные позиции
         val systemSet = systemMessages.toSet()
         val nonSystemSet = truncatedNonSystem.toSet()
-        
-        return original.filter { msg ->
-            msg in systemSet || msg in nonSystemSet
-        }
-    }
-    
-    /**
-     * Обрезает список сообщений по количеству токенов
-     */
-    private fun truncateByTokens(
-        messages: List<AgentMessage>,
-        maxTokens: Int
-    ): List<AgentMessage> {
-        if (messages.isEmpty() || maxTokens <= 0) return emptyList()
-        
-        var totalTokens = 0
-        var startIndex = messages.size
-        
-        for (i in messages.indices.reversed()) {
-            val messageTokens = tokenEstimator(messages[i])
-            if (totalTokens + messageTokens <= maxTokens) {
-                totalTokens += messageTokens
-                startIndex = i
-            } else {
-                break
-            }
-        }
-        
-        return if (startIndex < messages.size) {
-            messages.subList(startIndex, messages.size)
-        } else if (messages.isNotEmpty()) {
-            // Хотя бы последнее сообщение, даже если превышает лимит
-            listOf(messages.last())
-        } else {
-            emptyList()
-        }
+        return messages.filter { it in systemSet || it in nonSystemSet }
     }
 }

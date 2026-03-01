@@ -26,25 +26,68 @@ data class ConversationSummary(
 )
 ```
 
+## ContextTruncationStrategy
+
+```kotlin
+interface ContextTruncationStrategy {
+    suspend fun truncate(
+        messages: List<AgentMessage>,
+        maxTokens: Int?,
+        maxMessages: Int?
+    ): List<AgentMessage>
+
+    // Дополнительные системные сообщения для LLM-запроса.
+    // По умолчанию emptyList() — стратегии с компрессией переопределяют.
+    // SimpleLLMAgent вызывает через интерфейс — без приведения типов.
+    suspend fun getAdditionalSystemMessages(): List<AgentMessage> = emptyList()
+}
+```
+
+## Стратегии обрезки
+
+| Стратегия | Суть | `getAdditionalSystemMessages` |
+|-----------|------|-------------------------------|
+| `SimpleContextTruncationStrategy` | Удаляет старейшие сообщения | `emptyList()` (default) |
+| `PreserveSystemTruncationStrategy` | Удаляет старейшие, сохраняет system | `emptyList()` (default) |
+| `SummaryTruncationStrategy` | Сжимает старые в summary, оригиналы для UI | summary как `[system]` сообщение |
+
+## TruncationUtils (композиция)
+
+```kotlin
+typealias TokenEstimator = (AgentMessage) -> Int
+
+object TokenEstimators {
+    val default: TokenEstimator = { (it.content.length / 4).coerceAtLeast(1) }
+}
+
+object TruncationUtils {
+    fun truncateByTokens(
+        messages: List<AgentMessage>,
+        maxTokens: Int,
+        estimator: TokenEstimator
+    ): List<AgentMessage>
+}
+```
+
+Все три стратегии используют `TruncationUtils.truncateByTokens` и `TokenEstimators.default`
+через композицию — без наследования.
+
 ## SummaryTruncationStrategy
 
 ```kotlin
 class SummaryTruncationStrategy(
     private val summaryProvider: SummaryProvider,
-    private val summaryStorage: SummaryStorage,
+    private val summaryStorage: SummaryStorage,      // приватный, снаружи не виден
     private val keepRecentCount: Int = 10,
     private val summaryBlockSize: Int = 10,
-    private val tokenEstimator: (AgentMessage) -> Int = { it.content.length / 4 }
+    private val tokenEstimator: TokenEstimator = TokenEstimators.default
 ) : ContextTruncationStrategy {
-    override suspend fun truncate(messages, maxTokens, maxMessages): List<AgentMessage>
-
-    // Для LLM-запроса — только content, не originalMessages
-    suspend fun getSummariesAsMessages(): List<AgentMessage>
+    override suspend fun truncate(...)
+    override suspend fun getAdditionalSystemMessages(): List<AgentMessage>  // summary → LLM
 
     // Для Agent.getSummaries() / Agent.loadSummaries()
     suspend fun getSummaries(): List<ConversationSummary>
     suspend fun loadSummaries(summaries: List<ConversationSummary>)
-
     suspend fun clearSummaries()
 }
 ```
@@ -69,9 +112,6 @@ interface SummaryStorage {
 |------------|-----------|---------------|
 | `InMemorySummaryStorage` | RAM | `Mutex` |
 | `JsonSummaryStorage` | `summaries.json` | `Mutex` + `Dispatchers.IO` |
-
-`SummaryStorage` — деталь реализации агента, снаружи не используется.
-Создаётся в `AppModule` и передаётся в `SummaryTruncationStrategy`.
 
 ## SummaryProvider
 
@@ -98,11 +138,3 @@ interface SummaryProvider {
   }]
 }
 ```
-
-## Стратегии обрезки
-
-| Стратегия | Суть |
-|-----------|------|
-| `SimpleContextTruncationStrategy` | Удаляет старейшие сообщения |
-| `PreserveSystemTruncationStrategy` | Удаляет старейшие, сохраняет system |
-| `SummaryTruncationStrategy` | Сжимает старые в summary, оригиналы для UI |

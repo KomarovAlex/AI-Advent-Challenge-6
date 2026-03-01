@@ -17,8 +17,8 @@ interface Agent {
     suspend fun send(message: String): Flow<AgentStreamEvent>
     suspend fun clearHistory()               // очищает историю + summaries
     suspend fun addToHistory(message: AgentMessage)
-    fun updateConfig(newConfig: AgentConfig)
-    fun updateTruncationStrategy(strategy: ContextTruncationStrategy?)
+    fun updateConfig(newConfig: AgentConfig)           // не suspend — synchronized безопасен
+    fun updateTruncationStrategy(strategy: ContextTruncationStrategy?)  // не suspend
 }
 ```
 
@@ -63,7 +63,7 @@ data class AgentConfig(
 
 ```
 1. [system]    systemPrompt (если есть)
-2. [system]    "Previous conversation summary: …"  ← только content, не originalMessages
+2. [system]    "Previous conversation summary: …"  ← через getAdditionalSystemMessages()
 3a. keepConversationHistory=true  → _context.getHistory() (уже содержит userMessage)
 3b. keepConversationHistory=false → только текущий userMessage
 ```
@@ -87,7 +87,7 @@ interface AgentContext {
 }
 ```
 
-`SimpleAgentContext` — реализация с `synchronized` на каждой операции.
+`SimpleAgentContext` — реализация с `synchronized` на каждой операции (методы синхронные).
 
 ## AgentException
 
@@ -102,8 +102,24 @@ sealed class AgentException : Exception {
 
 ## Потокобезопасность SimpleLLMAgent
 
-| Поле | Механизм |
-|------|----------|
-| `_config`, `_truncationStrategy` | `synchronized(this)` |
-| `_context` | `synchronized` внутри `SimpleAgentContext` |
-| Flow стриминг | `.map` + `.catch` — нет вложенного collect |
+| Поле | Механизм | Почему |
+|------|----------|--------|
+| `_config` | `@Volatile` + `synchronized` в setter | Читается в suspend без блокировки, пишется редко |
+| `_truncationStrategy` | `@Volatile` + `synchronized` в setter | То же |
+| `_context` | `synchronized` внутри `SimpleAgentContext` | Методы синхронные, suspend-точек нет |
+| Flow стриминг | `.map` + `.catch` | Нет вложенного collect |
+
+```kotlin
+// ✅ @Volatile — видимость без блокировки при чтении в suspend
+@Volatile private var _config: AgentConfig = initialConfig
+
+// ✅ synchronized только в не-suspend методах (приостановок не будет)
+override fun updateConfig(newConfig: AgentConfig) {
+    synchronized(this) { _config = newConfig }
+}
+
+// ❌ synchronized в suspend — блокирует поток при приостановке корутины
+override suspend fun bad() {
+    synchronized(this) { withContext(IO) { ... } }  // НЕ ДЕЛАТЬ
+}
+```

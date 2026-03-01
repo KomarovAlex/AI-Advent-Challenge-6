@@ -78,12 +78,21 @@ ChatIntent
 
 | Компонент | Механизм | Почему |
 |-----------|----------|--------|
-| `SimpleAgentContext` | `synchronized` | Синхронные методы |
+| `SimpleAgentContext` | `synchronized` | Методы синхронные, suspend-точек нет |
 | `SummaryStorage` | `Mutex` | suspend + IO |
-| `SimpleLLMAgent._config` | `synchronized(this)` | Мутация из разных корутин |
+| `SimpleLLMAgent._config` | `@Volatile` + `synchronized` в setter | Читается в suspend без блокировки |
+| `SimpleLLMAgent._truncationStrategy` | `@Volatile` + `synchronized` в setter | То же |
 
 ```kotlin
-// ❌ synchronized блокирует поток внутри suspend
+// ✅ @Volatile — безопасное чтение в suspend без блокировки потока
+@Volatile private var _config: AgentConfig = initialConfig
+
+// ✅ synchronized только в не-suspend методах
+override fun updateConfig(newConfig: AgentConfig) {
+    synchronized(this) { _config = newConfig }
+}
+
+// ❌ synchronized в suspend блокирует поток при приостановке корутины
 suspend fun bad() { synchronized(lock) { withContext(IO) { } } }
 
 // ✅ Mutex приостанавливает корутину, поток свободен
@@ -94,8 +103,8 @@ suspend fun good() { mutex.withLock { withContext(IO) { } } }
 
 ```
 ✅ system prompt
-✅ ConversationSummary.content      (из SummaryTruncationStrategy)
-✅ _context.getHistory()            (активные сообщения)
+✅ getAdditionalSystemMessages() от стратегии  (например, summary)
+✅ _context.getHistory()                        (активные сообщения)
 
-❌ ConversationSummary.originalMessages  (только UI)
+❌ ConversationSummary.originalMessages         (только UI)
 ```

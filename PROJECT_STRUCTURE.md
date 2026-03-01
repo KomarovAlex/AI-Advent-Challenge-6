@@ -17,7 +17,8 @@ app/src/main/java/ru/koalexse/aichallenge/
 │       ├── AgentContext.kt         # Интерфейс хранилища (приватный для агента)
 │       ├── SimpleAgentContext.kt
 │       ├── strategy/
-│       │   ├── ContextTruncationStrategy.kt
+│       │   ├── ContextTruncationStrategy.kt      # + getAdditionalSystemMessages()
+│       │   ├── TruncationUtils.kt                # TokenEstimator, TokenEstimators, TruncationUtils
 │       │   ├── SimpleContextTruncationStrategy.kt
 │       │   ├── PreserveSystemTruncationStrategy.kt
 │       │   └── SummaryTruncationStrategy.kt
@@ -54,7 +55,7 @@ app/src/main/java/ru/koalexse/aichallenge/
 |------|------------|
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Схемы, поток данных, разделение ответственности |
 | [docs/AGENT.md](./docs/AGENT.md) | Agent, SimpleLLMAgent, AgentContext, buildMessageList |
-| [docs/COMPRESSION.md](./docs/COMPRESSION.md) | Summary-компрессия, SummaryStorage, стратегии |
+| [docs/COMPRESSION.md](./docs/COMPRESSION.md) | Стратегии, TruncationUtils, SummaryStorage |
 | [docs/DATA_LAYER.md](./docs/DATA_LAYER.md) | API, persistence, domain-модели |
 | [docs/UI_LAYER.md](./docs/UI_LAYER.md) | ViewModel, MVI, ChatUiState, AgentMessageUiMapper |
 | [docs/RECIPES.md](./docs/RECIPES.md) | Быстрый старт, типичные задачи, тесты |
