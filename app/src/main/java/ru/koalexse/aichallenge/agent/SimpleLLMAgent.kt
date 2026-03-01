@@ -38,8 +38,11 @@ import java.net.SocketTimeoutException
  * - [_config] и [_truncationStrategy] помечены `@Volatile` — гарантирует видимость
  *   изменений между потоками без блокировки при чтении в suspend-функциях.
  * - Запись защищена `synchronized` только в не-suspend методах [updateConfig] и
- *   [updateTruncationStrategy], где приостановки корутины невозможны.
+ *   [updateTruncationStrategy], где приостановок корутины нет.
  * - [_context] ([SimpleAgentContext]) использует `synchronized` внутри.
+ * - В каждом публичном методе делается **один** snapshot `val config = _config` —
+ *   все дальнейшие обращения к конфигу идут через локальную переменную, исключая
+ *   рассогласование при конкурентном [updateConfig].
  *
  * @param api интерфейс для работы с LLM API
  * @param initialConfig начальная конфигурация агента
@@ -73,18 +76,23 @@ class SimpleLLMAgent(
     // ==================== Core ====================
 
     override suspend fun chat(request: AgentRequest): AgentResponse {
+        // #10: validateRequest ПЕРВЫМ — до любой мутации _context.
+        // Если сообщение невалидно — история не будет испорчена.
+        validateRequest(request)
+
+        // #2: единственное volatile-чтение _config для всего вызова.
+        // Все дальнейшие обращения идут через локальный snapshot.
+        val config = _config
+
         return withContext(Dispatchers.IO) {
-            if (_config.keepConversationHistory) {
+            if (config.keepConversationHistory) {
                 addMessageWithTruncation(
-                    AgentMessage(
-                        role = Role.USER,
-                        content = request.userMessage
-                    )
+                    message = AgentMessage(role = Role.USER, content = request.userMessage),
+                    config = config
                 )
             }
-            validateRequest(request)
 
-            val chatRequest = buildChatRequest(request)
+            val chatRequest = buildChatRequest(request, config)
             val responseBuilder = StringBuilder()
             var finalStats: TokenStats? = null
             var finalDuration: Long? = null
@@ -101,12 +109,10 @@ class SimpleLLMAgent(
 
             val responseContent = responseBuilder.toString()
 
-            if (_config.keepConversationHistory) {
+            if (config.keepConversationHistory) {
                 addMessageWithTruncation(
-                    AgentMessage(
-                        role = Role.ASSISTANT,
-                        content = responseContent
-                    )
+                    message = AgentMessage(role = Role.ASSISTANT, content = responseContent),
+                    config = config
                 )
             }
 
@@ -120,12 +126,22 @@ class SimpleLLMAgent(
     }
 
     override suspend fun chatStream(request: AgentRequest): Flow<AgentStreamEvent> {
-        if (_config.keepConversationHistory) {
-            addMessageWithTruncation(AgentMessage(role = Role.USER, content = request.userMessage))
-        }
+        // #10: validateRequest ПЕРВЫМ — до любой мутации _context.
+        // Если сообщение невалидно — история не будет испорчена.
         validateRequest(request)
 
-        val chatRequest = buildChatRequest(request)
+        // #2: единственное volatile-чтение _config для всего вызова,
+        // включая замыкание внутри .map { } — конфиг не изменится в середине стрима.
+        val config = _config
+
+        if (config.keepConversationHistory) {
+            addMessageWithTruncation(
+                message = AgentMessage(role = Role.USER, content = request.userMessage),
+                config = config
+            )
+        }
+
+        val chatRequest = buildChatRequest(request, config)
         val responseBuilder = StringBuilder()
 
         return api.sendMessageStream(chatRequest)
@@ -137,12 +153,13 @@ class SimpleLLMAgent(
                     }
 
                     is StatsStreamResult.Stats -> {
-                        if (_config.keepConversationHistory && responseBuilder.isNotEmpty()) {
+                        if (config.keepConversationHistory && responseBuilder.isNotEmpty()) {
                             addMessageWithTruncation(
-                                AgentMessage(
+                                message = AgentMessage(
                                     role = Role.ASSISTANT,
                                     content = responseBuilder.toString()
-                                )
+                                ),
+                                config = config
                             )
                         }
                         AgentStreamEvent.Completed(
@@ -156,7 +173,8 @@ class SimpleLLMAgent(
     }
 
     override suspend fun send(message: String): Flow<AgentStreamEvent> {
-        // Единственное чтение _config — snapshot для всего вызова
+        // #2: единственное volatile-чтение — snapshot для всего вызова.
+        // chatStream получит уже готовый AgentRequest и не будет читать _config сам.
         val config = _config
         val request = AgentRequest(
             userMessage = message,
@@ -176,7 +194,8 @@ class SimpleLLMAgent(
     }
 
     override suspend fun addToHistory(message: AgentMessage) {
-        addMessageWithTruncation(message)
+        // Snapshot конфига для согласованного применения лимитов
+        addMessageWithTruncation(message, config = _config)
     }
 
     /**
@@ -235,18 +254,28 @@ class SimpleLLMAgent(
 
     // ==================== Private ====================
 
-    private suspend fun addMessageWithTruncation(message: AgentMessage) {
+    /**
+     * Добавляет сообщение в контекст и применяет стратегию обрезки.
+     *
+     * Принимает [config] явно — избегает повторного volatile-чтения [_config]
+     * в середине уже начатой операции (snapshot гарантирован вызывающим методом).
+     */
+    private suspend fun addMessageWithTruncation(message: AgentMessage, config: AgentConfig) {
         _context.addMessage(message)
-        applyTruncation()
+        applyTruncation(config)
     }
 
-    private suspend fun applyTruncation(): Unit = withContext(Dispatchers.IO) {
+    /**
+     * Применяет стратегию обрезки к текущей истории.
+     *
+     * Принимает [config] явно — тот же snapshot, что использовался при добавлении
+     * сообщения. Гарантирует согласованность лимитов внутри одной операции.
+     */
+    private suspend fun applyTruncation(config: AgentConfig): Unit = withContext(Dispatchers.IO) {
         val strategy = _truncationStrategy ?: return@withContext
         val history = _context.getHistory()
         if (history.isEmpty()) return@withContext
 
-        // Snapshot конфига — один раз, для согласованных параметров
-        val config = _config
         val truncated = strategy.truncate(
             messages = history,
             maxTokens = config.maxContextTokens,
@@ -258,6 +287,13 @@ class SimpleLLMAgent(
         }
     }
 
+    /**
+     * Валидирует запрос перед любыми изменениями состояния агента.
+     *
+     * Намеренно вызывается ПЕРВЫМ в [chat] и [chatStream] — до [addMessageWithTruncation].
+     * Это гарантирует, что при невалидном запросе история [_context] не будет изменена
+     * (не останется user-сообщения без соответствующего ответа ассистента).
+     */
     private fun validateRequest(request: AgentRequest) {
         if (request.userMessage.isBlank()) {
             throw AgentException.ValidationError("User message cannot be blank")
@@ -277,18 +313,27 @@ class SimpleLLMAgent(
         }
     }
 
-    private suspend fun buildChatRequest(request: AgentRequest): ChatRequest {
+    /**
+     * Собирает [ChatRequest] из [AgentRequest] и снимка конфигурации.
+     *
+     * Принимает [config] явно — не читает [_config] напрямую,
+     * чтобы не создавать дополнительных volatile-точек вне snapshot.
+     */
+    private suspend fun buildChatRequest(request: AgentRequest, config: AgentConfig): ChatRequest {
         return ChatRequest(
-            messages = buildMessageList(request),
+            messages = buildMessageList(request, config),
             model = request.model,
             temperature = request.temperature,
             max_tokens = request.maxTokens,
-            stop = request.stopSequences ?: _config.defaultStopSequences
+            // stopSequences из request имеют приоритет; fallback — из снимка конфига
+            stop = request.stopSequences ?: config.defaultStopSequences
         )
     }
 
     /**
      * Формирует список сообщений для API.
+     *
+     * Принимает [config] явно — не читает [_config] напрямую.
      *
      * Структура:
      * 1. System prompt (если есть)
@@ -296,11 +341,14 @@ class SimpleLLMAgent(
      * 3a. keepConversationHistory=true  → _context.getHistory() (уже включает userMessage)
      * 3b. keepConversationHistory=false → только текущий userMessage
      */
-    private suspend fun buildMessageList(request: AgentRequest): List<ApiMessage> {
+    private suspend fun buildMessageList(
+        request: AgentRequest,
+        config: AgentConfig
+    ): List<ApiMessage> {
         val messages = mutableListOf<ApiMessage>()
 
-        // 1. Системный промпт
-        val systemPrompt = request.systemPrompt ?: _config.defaultSystemPrompt
+        // 1. Системный промпт: из запроса или из снимка конфига
+        val systemPrompt = request.systemPrompt ?: config.defaultSystemPrompt
         if (!systemPrompt.isNullOrBlank()) {
             messages.add(ApiMessage(role = "system", content = systemPrompt))
         }
@@ -310,7 +358,7 @@ class SimpleLLMAgent(
             ?.forEach { msg -> messages.add(msg.toApiMessage()) }
 
         // 3. История или одиночный запрос
-        if (_config.keepConversationHistory) {
+        if (config.keepConversationHistory) {
             _context.getHistory().forEach { msg -> messages.add(msg.toApiMessage()) }
         } else {
             messages.add(ApiMessage(role = "user", content = request.userMessage))
@@ -325,7 +373,6 @@ class SimpleLLMAgent(
             "Request timed out: ${e.message}",
             e
         )
-
         else -> AgentException.ApiError(message = e.message ?: "Unknown error", cause = e)
     }
 
