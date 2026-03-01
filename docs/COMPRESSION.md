@@ -74,14 +74,21 @@ class SlidingWindowStrategy(
 ```
 История: [M1…M20], keepRecentCount=10
 
+После truncate():
+  _context (→ LLM):  [M11…M20]           ← только recent
+  factsStorage:      compressed=[M1…M10]  ← вытесненные сообщения (только UI)
+
 В LLM-запросе:
-  [system: "Key facts: goal: X, language: Kotlin"]   ← facts блок
-  [M11…M20]                                           ← последние 10 сообщений
+  [system: "Key facts: goal: X, language: Kotlin"]   ← из getAdditionalSystemMessages()
+  [M11…M20]                                           ← recent из _context
 
 UI:
-  📌 Key facts bubble (всегда сверху)
-  [M11…M20]
+  📌 Key facts bubble             ← факты (всегда сверху)
+  [M1🗜️ … M10🗜️]                 ← compressed messages (только UI, не идут в LLM)
+  [M11…M20]                       ← recent messages
 ```
+
+> `compressedMessages` — только UI. В LLM уходят **только факты** (как system) + recent.
 
 ```kotlin
 class StickyFactsStrategy(
@@ -92,15 +99,31 @@ class StickyFactsStrategy(
     private val tokenEstimator: TokenEstimator = TokenEstimators.default
 ) : ContextTruncationStrategy {
 
-    // clear() → factsStorage.clear()
+    // clear() → factsStorage.clear() (очищает и факты, и compressedMessages)
 
     // Доступ через capability (ViewModel):
     suspend fun getFacts(): List<Fact>
+    suspend fun getCompressedMessages(): List<AgentMessage>   // ← для UI
+    suspend fun loadCompressedMessages(messages: List<AgentMessage>)
     suspend fun refreshFacts(history: List<AgentMessage>): List<Fact>
-    suspend fun loadFacts(facts: List<Fact>)
     suspend fun clearFacts()
 }
 ```
+
+### Как работает вытеснение сообщений
+
+При каждом вызове `truncate()`, если история длиннее `keepRecentCount`:
+
+1. `oldMessages = messages.dropLast(keepRecentCount)` — сообщения за пределами окна
+2. `factsStorage.setCompressedMessages(alreadyCompressed + oldMessages)` — накапливаются
+3. В `_context` агента возвращаются только `recentMessages` — именно они идут в LLM
+4. Вытесненные сообщения хранятся в `facts.json` и видны в UI с пометкой «сжатые»
+
+### refreshFacts — работает только на recent
+
+`refreshFacts(history)` принимает `agent.conversationHistory` — это уже только recent-сообщения
+(вытесненные не входят). Вытесненные сообщения были учтены при предыдущих вызовах
+`refreshFacts` и отражены в существующих фактах.
 
 ### Использование из ViewModel (capability pattern)
 
@@ -109,11 +132,15 @@ class StickyFactsStrategy(
 private val factsStrategy: StickyFactsStrategy?
     get() = agent.truncationStrategy as? StickyFactsStrategy
 
-// Загрузка при старте:
+// Загрузка при старте (JsonFactsStorage восстановит из facts.json):
 val savedFacts = factsStrategy?.getFacts() ?: emptyList()
+val savedCompressed = factsStrategy?.getCompressedMessages() ?: emptyList()
 
-// Обновление по кнопке:
+// Обновление по кнопке (только recent-сообщения):
 val updated = factsStrategy?.refreshFacts(agent.conversationHistory) ?: emptyList()
+
+// Синхронизация compressed после каждого ответа:
+val newCompressed = factsStrategy?.getCompressedMessages() ?: emptyList()
 ```
 
 ### Fact
@@ -128,10 +155,14 @@ data class Fact(val key: String, val value: String, val updatedAt: Long)
 interface FactsStorage {
     suspend fun getFacts(): List<Fact>
     suspend fun replaceFacts(facts: List<Fact>)
-    suspend fun clear()
+    suspend fun clear()                                          // очищает всё
+
+    // Compressed messages — вытесненные из LLM-контекста (только UI)
+    suspend fun getCompressedMessages(): List<AgentMessage>
+    suspend fun setCompressedMessages(messages: List<AgentMessage>)
 }
 // InMemoryFactsStorage — для тестов
-// JsonFactsStorage (data/persistence/) — персистенция, facts.json
+// JsonFactsStorage (data/persistence/) — персистенция, facts.json (v2: facts + compressedMessages)
 ```
 
 ---
