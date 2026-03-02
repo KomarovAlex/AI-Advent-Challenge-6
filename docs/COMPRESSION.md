@@ -41,12 +41,6 @@ interface ContextTruncationStrategy {
 3. Добавить вариант в `ContextStrategyType` и `AppModule.buildStrategy()`
 4. Если нужен доступ из ViewModel — добавить capability accessor в `AgentChatViewModel`
 
-```kotlin
-// Пример capability accessor в ViewModel:
-private val myStrategy: MyCustomStrategy?
-    get() = agent.truncationStrategy as? MyCustomStrategy
-```
-
 ---
 
 ## Стратегия 1 — Sliding Window
@@ -54,18 +48,9 @@ private val myStrategy: MyCustomStrategy?
 ```
 История: [M1, M2, …, M15], windowSize=10
 
-До:   [M1, M2, …, M15]
 После truncate():
   _context: [M6, M7, …, M15]   ← только последние 10
   Старые сообщения отброшены без компрессии
-```
-
-```kotlin
-class SlidingWindowStrategy(
-    val windowSize: Int = 10,
-    private val tokenEstimator: TokenEstimator = TokenEstimators.default
-) : ContextTruncationStrategy
-// clear() — no-op (нет состояния)
 ```
 
 ---
@@ -73,27 +58,15 @@ class SlidingWindowStrategy(
 ## Стратегия 2 — Sticky Facts
 
 ```
-История: [M1…M20], keepRecentCount=10, autoRefreshThreshold=2
-
 После truncate():
-  _context (→ LLM):  [M11…M20]                           ← только recent
-  factsStorage:      facts=[goal: X, language: Kotlin]   ← обновлены автоматически
-                     compressed=[M1…M10]                 ← вытесненные (только UI)
+  _context (→ LLM):  [M11…M20]
+  factsStorage:      facts=[goal: X, language: Kotlin]
+                     compressed=[M1…M10]
 
 В LLM-запросе:
-  [system: "Key facts: goal: X, language: Kotlin"]   ← из getAdditionalSystemMessages()
-  [M11…M20]                                           ← recent из _context
-
-UI:
-  📌 Key facts bubble             ← факты (всегда сверху)
-  [M1🗜️ … M10🗜️]                 ← compressed messages (только UI, не идут в LLM)
-  [M11…M20]                       ← recent messages
+  [system: "Key facts: goal: X, language: Kotlin"]
+  [M11…M20]
 ```
-
-> `compressedMessages` — только UI.
-> В LLM уходят **только факты** (как system-сообщение) + recent-сообщения.
-
-### Сигнатура класса
 
 ```kotlin
 class StickyFactsStrategy(
@@ -115,18 +88,6 @@ class StickyFactsStrategy(
 
 ## Стратегия 3 — Branching
 
-```
-Начало: автоматически создаётся Branch 1 (пустая)
-
-[Checkpoint] → Branch 1 сохранена, создана Branch 2 (копия)
-Активна: Branch 2
-
-Переключение на Branch 1:
-  → Branch 2 сохранена
-  → история заменяется на историю Branch 1
-  → _context.replaceHistory(branch1.messages)
-```
-
 ```kotlin
 class BranchingStrategy(
     private val branchStorage: BranchStorage,
@@ -147,14 +108,11 @@ class BranchingStrategy(
 ## Стратегия 4 — Summary
 
 ```
-История: [M1 … M15], keepRecentCount=5, summaryBlockSize=10
-
 После truncate():
-  _context:        [M11, M12, M13, M14, M15]
+  _context:        [M11…M15]
   summaryStorage:  ConversationSummary(content="…", originalMessages=[M1…M10])
 
 LLM-запрос:  [system: summary] + [M11…M15]
-UI:          [M1🗜️ … M10🗜️] + [M11…M15]
 ```
 
 ```kotlin
@@ -180,26 +138,51 @@ class SummaryTruncationStrategy(
 | Слой | Что хранит | Триггер обновления | В LLM |
 |------|-----------|-------------------|-------|
 | `SHORT_TERM` | Последние `keepRecentCount` сообщений | Авто (скользящее окно в `truncate`) | ✅ как история `_context` |
-| `WORKING` | Текущая задача, шаги, промежуточные результаты | LLM-вызов при вытеснении сообщений (авто) + кнопка 💼 | ✅ как `[system]` |
+| `WORKING` | Текущая задача, шаги, промежуточные результаты | LLM-вызов при вытеснении (авто) + кнопка 💼 | ✅ как `[system]` |
 | `LONG_TERM` | Профиль, решения, устойчивые знания | Только явный запрос пользователя (кнопка 🧠) | ✅ как `[system]` |
+
+### Политика обновления LONG_TERM — только добавление
+
+**LONG_TERM никогда не перезаписывается.** Два уровня защиты:
+
+| Уровень | Механизм |
+|---------|----------|
+| **Промпт** | LLM получает существующие записи «для справки» и инструкцию возвращать **только новые факты** с ключами, которых ещё нет. Экономия токенов, меньше галлюцинаций. |
+| **Код** | `MemoryStorage.appendLongTerm()` фильтрует по `existingKeys` — даже если LLM вернул существующий ключ, он игнорируется. **Существующий ключ всегда побеждает.** |
+
+```
+Нажали 🧠 первый раз, в диалоге: "Меня зовут Алексей, пишу на Kotlin"
+  LLM → "name: Алексей\npreferred language: Kotlin"
+  appendLongTerm → добавлено (ключей не было)
+  LONG_TERM: { name: Алексей, preferred language: Kotlin }
+
+Нажали 🧠 второй раз, в диалоге: "Кстати, мой фреймворк — Compose"
+  LLM → "framework: Compose"           ← промпт сказал «не повторяй существующее»
+  appendLongTerm → "framework" — новый ключ → добавлено
+  LONG_TERM: { name: Алексей, preferred language: Kotlin, framework: Compose }
+
+Нажали 🧠 третий раз, LLM вдруг вернул "name: Коля"  ← галлюцинация
+  appendLongTerm → "name" уже есть в existingKeys → игнорируется
+  LONG_TERM: без изменений ✅
+
+Удаление — только через ClearAllMemory (явное действие пользователя)
+```
 
 ### Что уходит в LLM-запрос
 
 ```
-[system: "Long-term memory: ..."]    ← из getAdditionalSystemMessages()
-[system: "Working memory: ..."]      ← из getAdditionalSystemMessages()
-[M(n-N+1) … Mn]                      ← SHORT_TERM из _context (recent-окно)
+[system: "Long-term memory: ..."]    ← из getAdditionalSystemMessages() (если не пуст)
+[system: "Working memory: ..."]      ← из getAdditionalSystemMessages() (если не пуст)
+[M(n-N+1) … Mn]                      ← SHORT_TERM из _context
 ```
-
-Пустые слои пропускаются — если LONG_TERM пуст, его system-сообщение не добавляется.
 
 ### Что видно в UI
 
 ```
-🧠 Long-term memory bubble           ← долговременная память (фиолетовый фон)
-💼 Working memory bubble             ← рабочая память (синий фон)
+🧠 Long-term memory bubble           ← tertiaryContainer
+💼 Working memory bubble             ← primaryContainer
 [M1🗜️ … Mk🗜️]                       ← вытесненные сообщения (только UI)
-[Mk+1 … Mn]                          ← recent messages (SHORT_TERM)
+[Mk+1 … Mn]                          ← recent messages
 ```
 
 ### Логика truncate()
@@ -211,40 +194,20 @@ recentMessages = [M11…M20]  → в _context и LLM
 oldMessages    = [M1…M10]   → в compressedMessages (только UI)
 
 1. memoryStorage.setCompressedMessages(already + oldMessages)
-   → накапливаем для UI
-
 2. if (oldMessages.size >= autoRefreshThreshold):
-       refreshWorkingMemory(oldMessages)   ← LLM-вызов (авто, ошибка проглатывается)
-
-3. return recentMessages → в _context агента
+       refreshWorkingMemory(oldMessages)   ← авто, ошибка проглатывается
+3. return recentMessages
 ```
 
-> **LONG_TERM не обновляется автоматически** — только по явному запросу пользователя.
-> Это сделано намеренно: профиль и решения не должны меняться без ведома пользователя.
+> LONG_TERM **не обновляется автоматически** — только по явному запросу.
 
-### Обновление памяти — два сценария
+### Обновление слоёв — два сценария
 
-| Слой | Сценарий | Вызов | `history` |
-|------|----------|-------|-----------|
-| WORKING | **Авто** (внутри `truncate`) | `refreshWorkingMemory(oldMessages)` | вытесняемый блок |
-| WORKING | **Ручной** (кнопка 💼) | `refreshWorkingMemory(agent.conversationHistory)` | текущая active-история |
-| LONG_TERM | **Ручной** (кнопка 🧠) | `refreshLongTermMemory(agent.conversationHistory)` | текущая active-история |
-
-### Промпты
-
-**WORKING** — фокус на текущей задаче:
-- цель и подцели задачи
-- шаги и их статус (pending/done/in-progress)
-- промежуточные результаты и переменные
-- открытые вопросы и блокеры
-
-**LONG_TERM** — фокус на профиле пользователя:
-- имя, роль, уровень экспертизы
-- стабильные предпочтения (язык, инструменты, фреймворки)
-- важные решения
-- долгосрочные цели и проекты
-
-LLM отвечает в формате `key: value` (одна запись на строку) или `NO_ENTRIES`.
+| Слой | Сценарий | Вызов | Политика |
+|------|----------|-------|----------|
+| WORKING | **Авто** (в `truncate`) | `refreshWorkingMemory(oldMessages)` | Полная замена — задача могла смениться |
+| WORKING | **Ручной** (кнопка 💼) | `refreshWorkingMemory(agent.conversationHistory)` | Полная замена |
+| LONG_TERM | **Ручной** (кнопка 🧠) | `refreshLongTermMemory(agent.conversationHistory)` | Только добавление новых ключей |
 
 ### Сигнатура класса
 
@@ -268,7 +231,10 @@ class LayeredMemoryStrategy(
 
     // Capability (обновление):
     suspend fun refreshWorkingMemory(history: List<AgentMessage>): List<MemoryEntry>
+    // WORKING: LLM мёрджит → replaceWorking (полная замена)
+
     suspend fun refreshLongTermMemory(history: List<AgentMessage>): List<MemoryEntry>
+    // LONG_TERM: LLM возвращает только новое → appendLongTerm (только добавление)
 
     // Полная очистка (включая LONG_TERM):
     suspend fun clearAllMemory()
@@ -279,31 +245,24 @@ class LayeredMemoryStrategy(
 
 ```kotlin
 interface MemoryStorage {
+    // Working — полная замена разрешена (задача меняется)
     suspend fun getWorking(): List<MemoryEntry>
     suspend fun replaceWorking(entries: List<MemoryEntry>)
+
+    // Long-term — только добавление через appendLongTerm
     suspend fun getLongTerm(): List<MemoryEntry>
-    suspend fun replaceLongTerm(entries: List<MemoryEntry>)
+    suspend fun appendLongTerm(entries: List<MemoryEntry>)  // только новые ключи
+    suspend fun replaceLongTerm(entries: List<MemoryEntry>) // только для clearAll
+
+    // Compressed (только UI)
     suspend fun getCompressedMessages(): List<AgentMessage>
     suspend fun setCompressedMessages(messages: List<AgentMessage>)
-    suspend fun clearSession()   // очищает WORKING + compressed, LONG_TERM — нет
-    suspend fun clearAll()       // очищает всё включая LONG_TERM
-}
 
+    suspend fun clearSession()  // WORKING + compressed; LONG_TERM — нет
+    suspend fun clearAll()      // всё включая LONG_TERM
+}
 // InMemoryMemoryStorage  — для тестов
 // JsonMemoryStorage      — три отдельных файла (data/persistence/)
-```
-
-### Модели данных
-
-```kotlin
-enum class MemoryLayer { SHORT_TERM, WORKING, LONG_TERM }
-
-data class MemoryEntry(
-    val key: String,
-    val value: String,
-    val layer: MemoryLayer,
-    val updatedAt: Long = System.currentTimeMillis()
-)
 ```
 
 ### Persistence — три отдельных файла
@@ -311,7 +270,7 @@ data class MemoryEntry(
 | Файл | Слой | Очищается при `clearSession`? |
 |------|------|-------------------------------|
 | `memory_working.json` | WORKING | ✅ да |
-| `memory_long_term.json` | LONG_TERM | ❌ нет (persist между сессиями) |
+| `memory_long_term.json` | LONG_TERM | ❌ нет (persist между сессиями, только `clearAll`) |
 | `memory_compressed.json` | compressed UI | ✅ да |
 
 ### Capability pattern в ViewModel
@@ -320,32 +279,32 @@ data class MemoryEntry(
 private val layeredMemoryStrategy: LayeredMemoryStrategy?
     get() = agent.truncationStrategy as? LayeredMemoryStrategy
 
-// Загрузка при старте:
-val savedWorking    = layeredMemoryStrategy?.getWorkingMemory()    ?: emptyList()
-val savedLongTerm   = layeredMemoryStrategy?.getLongTermMemory()   ?: emptyList()
+// Загрузка при старте (JsonMemoryStorage восстанавливает из файлов лениво):
+val savedWorking    = layeredMemoryStrategy?.getWorkingMemory()      ?: emptyList()
+val savedLongTerm   = layeredMemoryStrategy?.getLongTermMemory()     ?: emptyList()
 val savedCompressed = layeredMemoryStrategy?.getCompressedMessages() ?: emptyList()
 
-// Ручной refresh по кнопке 💼:
+// Ручной refresh 💼 (WORKING — полная замена):
 val updated = layeredMemoryStrategy?.refreshWorkingMemory(agent.conversationHistory)
 
-// Ручной refresh по кнопке 🧠:
+// Ручной refresh 🧠 (LONG_TERM — только добавление новых фактов):
 val updated = layeredMemoryStrategy?.refreshLongTermMemory(agent.conversationHistory)
 
 // После каждого ответа (Completed) — синхронизация:
-val newWorking   = layeredMemoryStrategy?.getWorkingMemory()    ?: emptyList()
-val newLongTerm  = layeredMemoryStrategy?.getLongTermMemory()   ?: emptyList()
+val newWorking    = layeredMemoryStrategy?.getWorkingMemory()      ?: emptyList()
+val newLongTerm   = layeredMemoryStrategy?.getLongTermMemory()     ?: emptyList()
 val newCompressed = layeredMemoryStrategy?.getCompressedMessages() ?: emptyList()
 ```
 
 ### ClearSession: LONG_TERM намеренно сохраняется
 
 ```kotlin
-// ViewModel.clearSession():
-agent.clearHistory()   // вызывает strategy.clear() → memoryStorage.clearSession()
-//   ↳ WORKING очищен
-//   ↳ compressed очищен
-//   ↳ LONG_TERM — НЕ тронут
+// agent.clearHistory() → strategy.clear() → memoryStorage.clearSession():
+//   WORKING    → очищен
+//   compressed → очищен
+//   LONG_TERM  → НЕ тронут
 
+// После clearSession ViewModel читает longTerm из storage:
 val longTermAfterClear = layeredMemoryStrategy?.getLongTermMemory() ?: emptyList()
 _internalState.update {
     it.copy(
@@ -356,40 +315,19 @@ _internalState.update {
 }
 ```
 
-### Настройка в AppModule
-
-```kotlin
-ContextStrategyType.LAYERED_MEMORY -> LayeredMemoryStrategy(
-    api = statsLLMApi,
-    memoryStorage = JsonMemoryStorage(context),
-    memoryModel = defaultModel,
-    // keepRecentCount = 10  (по умолчанию) — размер SHORT_TERM окна
-    // autoRefreshThreshold = 2  (по умолчанию) — триггер авторефреша WORKING
-)
-```
-
 ---
 
 ## Сравнение всех стратегий
 
 | | Sliding Window | Sticky Facts | Summary | Branching | Layered Memory |
 |---|---|---|---|---|---|
-| Что в LLM вместо старых сообщений | ничего (отброшены) | key-value факты | текст summary | ничего (другая ветка) | working + long-term |
-| Автообновление | — | ✅ (WORKING-аналог) | ✅ | — | ✅ (только WORKING) |
+| Что в LLM вместо старых сообщений | ничего | key-value факты | текст summary | ничего | working + long-term |
+| Автообновление | — | ✅ (facts) | ✅ | — | ✅ (только WORKING) |
 | Ручное обновление | — | ✅ кнопка ✨ | — | — | ✅ кнопки 💼 и 🧠 |
+| Политика обновления | — | мёрдж | накопление | snapshot | WORKING: замена; LONG_TERM: **только добавление** |
 | Persistence | — | `facts.json` | `summaries.json` | `branches.json` | 3 файла |
-| Persist между сессиями | — | ✅ | ✅ | ✅ | ✅ (LONG_TERM всегда, WORKING сбрасывается) |
-| LLM-вызовы помимо основного | — | 1 (facts) | 1 (summary) | — | до 2 (working + long-term) |
-
----
-
-## AgentConfig: maxContextTokens vs defaultMaxTokens
-
-| Поле | Тип | Семантика | Куда передаётся |
-|------|-----|-----------|-----------------|
-| `defaultMaxTokens` | `Long?` | макс. токенов в **ответе** LLM | `ChatRequest.max_tokens` |
-| `maxContextTokens` | `Int?` | макс. токенов в **контексте** истории | `strategy.truncate(maxTokens=...)` |
-| `maxHistorySize` | `Int?` | макс. сообщений в контексте | `strategy.truncate(maxMessages=...)` |
+| Persist между сессиями | — | ✅ | ✅ | ✅ | ✅ LONG_TERM всегда; WORKING сбрасывается |
+| LLM-вызовы помимо основного | — | 1 | 1 | — | до 2 |
 
 ---
 
@@ -397,11 +335,7 @@ ContextStrategyType.LAYERED_MEMORY -> LayeredMemoryStrategy(
 
 ```kotlin
 object TruncationUtils {
-    fun truncateByTokens(
-        messages: List<AgentMessage>,
-        maxTokens: Int,
-        estimator: TokenEstimator
-    ): List<AgentMessage>
+    fun truncateByTokens(messages, maxTokens, estimator): List<AgentMessage>
 }
 ```
 
@@ -411,12 +345,11 @@ object TruncationUtils {
 
 ## Переключение стратегий в UI
 
-1. Пользователь открывает настройки (кнопка ⚙️)
-2. Выбирает стратегию из списка (включая «Layered Memory 🧠»)
-3. `SaveSettings` → `ViewModel.handleSettingsUpdate()` → `applyStrategyChange()`
-4. `agent.updateTruncationStrategy(factory(newStrategyType))` — история в `_context` не трогается
-5. ViewModel читает начальное состояние через capability accessor новой стратегии
-6. Кнопки тулбара обновляются по `activeStrategy`:
-   - `STICKY_FACTS`    → кнопка ✨ (Refresh Facts)
-   - `BRANCHING`       → кнопки 🔖 (Checkpoint) и 🌿 (Switch Branch)
-   - `LAYERED_MEMORY`  → кнопки 💼 (Working Memory) и 🧠 (Long-Term Memory)
+1. Пользователь открывает настройки (кнопка ⚙️) → выбирает стратегию
+2. `SaveSettings` → `ViewModel.handleSettingsUpdate()` → `applyStrategyChange()`
+3. `agent.updateTruncationStrategy(factory(newStrategyType))`
+4. ViewModel читает начальное состояние через capability accessor новой стратегии
+5. Кнопки тулбара:
+   - `STICKY_FACTS`   → ✨ Refresh Facts
+   - `BRANCHING`      → 🔖 Checkpoint, 🌿 Switch Branch
+   - `LAYERED_MEMORY` → 💼 Working Memory, 🧠 Long-Term Memory

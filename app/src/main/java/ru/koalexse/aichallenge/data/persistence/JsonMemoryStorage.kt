@@ -46,25 +46,28 @@ private data class PersistedMemoryEntry(
  * | LONG_TERM | `memory_long_term.json`  | ❌ нет (persist между сессиями) |
  * | Compressed messages | `memory_compressed.json` | ✅ да |
  *
+ * **LONG_TERM никогда не перезаписывается** — только пополняется через [appendLongTerm].
+ * Удаление возможно только через [clearAll].
+ *
  * Каждый файл загружается лениво при первом обращении и кэшируется в памяти.
- * Потокобезопасность через [Mutex].
+ * Три независимых [Mutex] — нет блокировок между независимыми слоями.
  */
 class JsonMemoryStorage(private val context: Context) : MemoryStorage {
 
     private val gson: Gson = GsonBuilder().setPrettyPrinting().create()
 
     // Отдельный Mutex для каждого файла — нет блокировок между независимыми слоями
-    private val workingMutex = Mutex()
-    private val longTermMutex = Mutex()
+    private val workingMutex    = Mutex()
+    private val longTermMutex   = Mutex()
     private val compressedMutex = Mutex()
 
     // Кэши (null = ещё не загружено)
-    private var cachedWorking: MutableList<MemoryEntry>? = null
-    private var cachedLongTerm: MutableList<MemoryEntry>? = null
+    private var cachedWorking:    MutableList<MemoryEntry>?  = null
+    private var cachedLongTerm:   MutableList<MemoryEntry>?  = null
     private var cachedCompressed: MutableList<AgentMessage>? = null
 
-    private val workingFile: File get() = File(context.filesDir, "memory_working.json")
-    private val longTermFile: File get() = File(context.filesDir, "memory_long_term.json")
+    private val workingFile:    File get() = File(context.filesDir, "memory_working.json")
+    private val longTermFile:   File get() = File(context.filesDir, "memory_long_term.json")
     private val compressedFile: File get() = File(context.filesDir, "memory_compressed.json")
 
     // ==================== Working ====================
@@ -88,6 +91,25 @@ class JsonMemoryStorage(private val context: Context) : MemoryStorage {
         cachedLongTerm!!.toList()
     }
 
+    /**
+     * Добавляет к LONG_TERM только записи с новыми ключами.
+     * Существующие ключи **не перезаписываются** — существующая запись всегда побеждает.
+     */
+    override suspend fun appendLongTerm(entries: List<MemoryEntry>) {
+        longTermMutex.withLock {
+            ensureLongTermLoaded()
+            val existingKeys = cachedLongTerm!!.map { it.key }.toSet()
+            val newOnly = entries.filter { it.key !in existingKeys }
+            if (newOnly.isNotEmpty()) {
+                cachedLongTerm!!.addAll(newOnly)
+                saveLongTermLocked()
+            }
+        }
+    }
+
+    /**
+     * Полностью заменяет LONG_TERM. Вызывать только из [clearAll].
+     */
     override suspend fun replaceLongTerm(entries: List<MemoryEntry>) {
         longTermMutex.withLock {
             cachedLongTerm = entries.toMutableList()
@@ -165,23 +187,17 @@ class JsonMemoryStorage(private val context: Context) : MemoryStorage {
 
     private suspend fun saveWorkingLocked() {
         val snapshot = cachedWorking!!.toList()
-        withContext(Dispatchers.IO) {
-            saveEntriesToFile(workingFile, snapshot)
-        }
+        withContext(Dispatchers.IO) { saveEntriesToFile(workingFile, snapshot) }
     }
 
     private suspend fun saveLongTermLocked() {
         val snapshot = cachedLongTerm!!.toList()
-        withContext(Dispatchers.IO) {
-            saveEntriesToFile(longTermFile, snapshot)
-        }
+        withContext(Dispatchers.IO) { saveEntriesToFile(longTermFile, snapshot) }
     }
 
     private suspend fun saveCompressedLocked() {
         val snapshot = cachedCompressed!!.toList()
-        withContext(Dispatchers.IO) {
-            saveCompressedToFile(compressedFile, snapshot)
-        }
+        withContext(Dispatchers.IO) { saveCompressedToFile(compressedFile, snapshot) }
     }
 
     // ==================== Private: file IO ====================

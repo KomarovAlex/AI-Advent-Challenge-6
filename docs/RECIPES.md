@@ -5,7 +5,6 @@
 ### Инициализация
 
 ```kotlin
-// MainActivity.kt
 private val appModule by lazy {
     AppContainer.initialize(
         context = applicationContext,
@@ -15,19 +14,12 @@ private val appModule by lazy {
     )
 }
 
-// Без компрессии — стратегия по умолчанию SUMMARY
+// Стратегия по умолчанию — SUMMARY
 val viewModel = appModule.createAgentChatViewModel()
 
 // С явным указанием стратегии
 val viewModel = appModule.createAgentChatViewModel(
     initialStrategyType = ContextStrategyType.LAYERED_MEMORY
-)
-
-// С кастомными параметрами Summary-стратегии
-val viewModel = appModule.createAgentChatViewModelWithCompression(
-    keepRecentCount = 10,
-    summaryBlockSize = 10,
-    useLLMForSummary = true
 )
 ```
 
@@ -38,8 +30,8 @@ val strategy = LayeredMemoryStrategy(
     api = statsLLMApi,
     memoryStorage = JsonMemoryStorage(context),
     memoryModel = "gpt-4",
-    keepRecentCount = 10,          // размер SHORT_TERM окна
-    autoRefreshThreshold = 2       // триггер авторефреша WORKING
+    keepRecentCount = 10,
+    autoRefreshThreshold = 2
 )
 val agent = SimpleLLMAgent(
     api = statsLLMApi,
@@ -48,7 +40,7 @@ val agent = SimpleLLMAgent(
     truncationStrategy = strategy
 )
 
-// Доступ к слоям — через capability, не через Agent
+// Чтение через capability
 val working  = (agent.truncationStrategy as? LayeredMemoryStrategy)?.getWorkingMemory()
 val longTerm = (agent.truncationStrategy as? LayeredMemoryStrategy)?.getLongTermMemory()
 ```
@@ -65,50 +57,29 @@ agent.send("Привет!").collect { event ->
 }
 ```
 
-### Builder DSL
-
-```kotlin
-val agent = buildAgent {
-    withApi(statsApi)
-    model("gpt-4")
-    temperature(0.7f)
-    systemPrompt("You are a helpful assistant.")
-    maxContextTokens(8000)
-    maxTokens(4096L)
-    truncationStrategy(LayeredMemoryStrategy(
-        api = statsApi,
-        memoryStorage = InMemoryMemoryStorage(),
-        memoryModel = "gpt-4"
-    ))
-}
-```
-
 ---
 
 ## Типичные задачи
 
-### Добавить новый Intent в чат
+### Добавить новый Intent
+
 1. Добавить case в `sealed class ChatIntent` (`ui/AgentChatViewModel.kt`)
 2. Обработать в `handleIntent()`
 
 ### Добавить поле в настройки
+
 1. `SettingsData` (`ui/state/ChatUiState.kt`)
 2. `AgentConfig` (`agent/AgentModels.kt`) — если нужно влиять на агента
 3. `Dialog.kt` — UI
 
 ### Добавить стратегию обрезки
+
 1. Реализовать `ContextTruncationStrategy` в `agent/context/strategy/`
 2. Переопределить `clear()` если стратегия хранит состояние
 3. Добавить вариант в `ContextStrategyType` (`ui/state/ChatUiState.kt`)
 4. Добавить создание в `AppModule.buildStrategy()`
 5. Добавить `displayName()` в `Dialog.kt`
-6. Если нужен доступ из ViewModel — добавить capability accessor:
-
-```kotlin
-// В AgentChatViewModel:
-private val myStrategy: MyCustomStrategy?
-    get() = agent.truncationStrategy as? MyCustomStrategy
-```
+6. Добавить capability accessor в `AgentChatViewModel` при необходимости
 
 ### Получить доступ к данным стратегии из ViewModel
 
@@ -121,119 +92,148 @@ summaryStrategy?.loadSummaries(list)
 factsStrategy?.getFacts()
 factsStrategy?.refreshFacts(agent.conversationHistory)
 
-// Layered Memory:
+// Layered Memory — чтение:
 layeredMemoryStrategy?.getWorkingMemory()
 layeredMemoryStrategy?.getLongTermMemory()
 layeredMemoryStrategy?.getCompressedMessages()
-layeredMemoryStrategy?.refreshWorkingMemory(agent.conversationHistory)   // авто или ручной
-layeredMemoryStrategy?.refreshLongTermMemory(agent.conversationHistory)  // только ручной
 
-// Branches — через Agent (требуют синхронизации _context):
+// WORKING (полная замена — задача могла смениться):
+layeredMemoryStrategy?.refreshWorkingMemory(agent.conversationHistory)
+
+// LONG_TERM (только добавление новых фактов — существующие не трогаются):
+layeredMemoryStrategy?.refreshLongTermMemory(agent.conversationHistory)
+
+// Branches — через Agent:
 agent.getBranches()
-agent.getActiveBranchId()
 agent.createCheckpoint()
 agent.switchToBranch(branchId)
 ```
 
 ### Понять, что попало в каждый слой памяти
 
-Для LayeredMemoryStrategy:
-
 ```
-SHORT_TERM  → agent.conversationHistory           — последние keepRecentCount сообщений
-WORKING     → layeredMemoryStrategy?.getWorkingMemory()  — что извлёк LLM из диалога
-LONG_TERM   → layeredMemoryStrategy?.getLongTermMemory() — что пользователь сохранил явно
+SHORT_TERM  → agent.conversationHistory              — последние keepRecentCount сообщений
+WORKING     → layeredMemoryStrategy?.getWorkingMemory()   — текущая задача, шаги
+LONG_TERM   → layeredMemoryStrategy?.getLongTermMemory()  — профиль, решения, знания
 compressed  → layeredMemoryStrategy?.getCompressedMessages() — вытесненные из окна
 ```
 
 В LLM-запросе:
 ```
-[system: long-term]   ← getLongTermMemory() → если не пуст
-[system: working]     ← getWorkingMemory()  → если не пуст
-[history: M(n-N+1)…Mn] ← agent.conversationHistory
+[system: long-term]     ← если не пуст
+[system: working]       ← если не пуст
+[history: M(n-N+1)…Mn]
+```
+
+### Политика LONG_TERM: только добавление
+
+```
+Существующие записи в LONG_TERM:
+  • name: Алексей
+  • preferred language: Kotlin
+
+Нажали 🧠 → LLM видит диалог "мой фреймворк — Compose":
+  LLM возвращает: "framework: Compose"   (промпт: не повторяй существующее)
+  appendLongTerm  → "framework" — новый ключ → добавляется
+
+  LONG_TERM: { name: Алексей, preferred language: Kotlin, framework: Compose }
+
+Нажали 🧠 снова, LLM вернул "name: Коля"  ← галлюцинация:
+  appendLongTerm → "name" уже есть → игнорируется ✅
+
+Удалить всё → только ClearAllMemory (явное действие пользователя)
 ```
 
 ### ClearSession vs ClearAllMemory
 
 ```
-ClearSession  (кнопка 🧹) → agent.clearHistory()
-                            → strategy.clear()
-                            → memoryStorage.clearSession()
-                               ↳ WORKING очищен
-                               ↳ compressed очищен
-                               ↳ LONG_TERM — НЕ тронут (persist!)
+ClearSession (кнопка 🧹):
+  agent.clearHistory() → strategy.clear() → memoryStorage.clearSession()
+    WORKING    → очищен
+    compressed → очищен
+    LONG_TERM  → НЕ тронут ← persist между сессиями
 
-ClearAllMemory (ChatIntent.ClearAllMemory) → layeredMemoryStrategy?.clearAllMemory()
-                            → memoryStorage.clearAll()
-                               ↳ WORKING, LONG_TERM, compressed — все очищены
+ClearAllMemory (ChatIntent.ClearAllMemory):
+  layeredMemoryStrategy?.clearAllMemory() → memoryStorage.clearAll()
+    WORKING, LONG_TERM, compressed → все очищены
 ```
-
-### Изменить формат сохранения истории
-1. Обновить модели в `ChatHistoryModels.kt`
-2. Обновить маппер в `ChatHistoryMapper.kt`
-3. При необходимости — добавить миграцию в `JsonChatHistoryRepository`
 
 ---
 
 ## Тесты
 
 ```kotlin
-// Агент тестируется без Android — не нужен Context, эмулятор
 @Test
-fun `layered memory: working auto-refreshes on truncate`() = runTest {
+fun `LONG_TERM: append does not overwrite existing keys`() = runTest {
     val storage = InMemoryMemoryStorage()
-    val mockApi = MockStatsLLMApi("current task: write tests\nstatus: in-progress")
-    val strategy = LayeredMemoryStrategy(
-        api = mockApi,
-        memoryStorage = storage,
-        memoryModel = "gpt-4",
-        keepRecentCount = 5,
-        autoRefreshThreshold = 2
-    )
-    val agent = SimpleLLMAgent(
-        api = mockApi,
-        initialConfig = config,
-        truncationStrategy = strategy
-    )
+    storage.appendLongTerm(listOf(
+        MemoryEntry("name", "Alexey", MemoryLayer.LONG_TERM)
+    ))
 
-    // Добавляем 7 сообщений — 2 вытесняются (>= autoRefreshThreshold)
-    repeat(7) { agent.addToHistory(AgentMessage(Role.USER, "Message $it")) }
+    // Пытаемся перезаписать существующий ключ
+    storage.appendLongTerm(listOf(
+        MemoryEntry("name", "Kolya", MemoryLayer.LONG_TERM),  // существующий — должен остаться
+        MemoryEntry("language", "Kotlin", MemoryLayer.LONG_TERM)  // новый — должен добавиться
+    ))
 
-    // SHORT_TERM: только последние 5
-    assertEquals(5, agent.conversationHistory.size)
-
-    // WORKING: LLM вызвался для вытесненных 2 сообщений
-    val working = (agent.truncationStrategy as? LayeredMemoryStrategy)?.getWorkingMemory()
-    assertTrue(working?.isNotEmpty() == true)
+    val result = storage.getLongTerm()
+    assertEquals(2, result.size)
+    assertEquals("Alexey", result.first { it.key == "name" }.value)  // не перезаписан
+    assertEquals("Kotlin", result.first { it.key == "language" }.value)
 }
 
 @Test
-fun `layered memory: long-term persists after clearSession`() = runTest {
+fun `LONG_TERM: persists after clearSession`() = runTest {
     val storage = InMemoryMemoryStorage()
-    storage.replaceLongTerm(listOf(MemoryEntry("name", "Alexey", MemoryLayer.LONG_TERM)))
+    storage.appendLongTerm(listOf(MemoryEntry("name", "Alexey", MemoryLayer.LONG_TERM)))
 
     val strategy = LayeredMemoryStrategy(
-        api = mockApi,
-        memoryStorage = storage,
-        memoryModel = "gpt-4"
+        api = mockApi, memoryStorage = storage, memoryModel = "gpt-4"
     )
     val agent = SimpleLLMAgent(api = mockApi, initialConfig = config, truncationStrategy = strategy)
     agent.addToHistory(AgentMessage(Role.USER, "Hello"))
 
-    agent.clearHistory()  // → strategy.clear() → clearSession()
+    agent.clearHistory()  // → clearSession → LONG_TERM не трогается
 
-    // LONG_TERM должен сохраниться
     assertEquals(1, storage.getLongTerm().size)
     assertEquals("Alexey", storage.getLongTerm().first().value)
-    // WORKING должен очиститься
     assertTrue(storage.getWorking().isEmpty())
+}
+
+@Test
+fun `LONG_TERM: clearAll removes everything`() = runTest {
+    val storage = InMemoryMemoryStorage()
+    storage.appendLongTerm(listOf(MemoryEntry("name", "Alexey", MemoryLayer.LONG_TERM)))
+    storage.replaceWorking(listOf(MemoryEntry("task", "write tests", MemoryLayer.WORKING)))
+
+    storage.clearAll()
+
+    assertTrue(storage.getLongTerm().isEmpty())
+    assertTrue(storage.getWorking().isEmpty())
+}
+
+@Test
+fun `WORKING: refreshWorkingMemory replaces fully`() = runTest {
+    val storage = InMemoryMemoryStorage()
+    storage.replaceWorking(listOf(MemoryEntry("old task", "done", MemoryLayer.WORKING)))
+
+    val mockApi = MockStatsLLMApi("new task: write documentation\nstatus: in-progress")
+    val strategy = LayeredMemoryStrategy(
+        api = mockApi, memoryStorage = storage, memoryModel = "gpt-4"
+    )
+
+    strategy.refreshWorkingMemory(listOf(AgentMessage(Role.USER, "Now writing docs")))
+
+    val working = storage.getWorking()
+    assertFalse(working.any { it.key == "old task" })  // старое удалено
+    assertTrue(working.any { it.key == "new task" })    // новое добавлено
 }
 
 @Test
 fun `layered memory: getAdditionalSystemMessages returns both layers`() = runTest {
     val storage = InMemoryMemoryStorage()
     storage.replaceWorking(listOf(MemoryEntry("task", "write tests", MemoryLayer.WORKING)))
-    storage.replaceLongTerm(listOf(MemoryEntry("name", "Alexey", MemoryLayer.LONG_TERM)))
+    storage.appendLongTerm(listOf(MemoryEntry("name", "Alexey", MemoryLayer.LONG_TERM)))
 
     val strategy = LayeredMemoryStrategy(
         api = mockApi, memoryStorage = storage, memoryModel = "gpt-4"
@@ -247,41 +247,18 @@ fun `layered memory: getAdditionalSystemMessages returns both layers`() = runTes
 }
 
 @Test
-fun `summary: compressed messages not sent to LLM`() = runTest {
-    val storage = InMemorySummaryStorage()
-    val strategy = SummaryTruncationStrategy(
-        summaryProvider = MockSummaryProvider("Summary"),
-        summaryStorage = storage,
-        keepRecentCount = 5,
-        summaryBlockSize = 10
+fun `layered memory: empty layers skipped in system messages`() = runTest {
+    val storage = InMemoryMemoryStorage()
+    // только WORKING, LONG_TERM пуст
+    storage.replaceWorking(listOf(MemoryEntry("task", "X", MemoryLayer.WORKING)))
+
+    val strategy = LayeredMemoryStrategy(
+        api = mockApi, memoryStorage = storage, memoryModel = "gpt-4"
     )
-    val agent = SimpleLLMAgent(
-        api = mockApi, initialConfig = config, truncationStrategy = strategy
-    )
-    repeat(15) { agent.addToHistory(AgentMessage(Role.USER, "Message $it")) }
 
-    assertEquals(5, agent.conversationHistory.size)
+    val systemMessages = strategy.getAdditionalSystemMessages()
 
-    val summaries = (agent.truncationStrategy as? SummaryTruncationStrategy)?.getSummaries()
-    assertEquals(1, summaries?.size)
-    assertEquals(10, summaries?.first()?.originalMessages?.size)
-}
-
-@Test
-fun `clearHistory delegates to strategy`() = runTest {
-    val storage = InMemorySummaryStorage()
-    storage.addSummary(ConversationSummary("text", emptyList()))
-
-    val agent = SimpleLLMAgent(
-        api = mockApi,
-        initialConfig = config,
-        truncationStrategy = SummaryTruncationStrategy(
-            summaryProvider = MockSummaryProvider(""),
-            summaryStorage = storage
-        )
-    )
-    agent.clearHistory()
-
-    assertTrue(storage.isEmpty())
+    assertEquals(1, systemMessages.size)
+    assertTrue(systemMessages[0].content.contains("Working memory"))
 }
 ```

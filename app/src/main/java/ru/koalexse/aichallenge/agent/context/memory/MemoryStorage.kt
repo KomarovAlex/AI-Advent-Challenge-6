@@ -8,11 +8,13 @@ import ru.koalexse.aichallenge.agent.AgentMessage
  * Хранилище трёхслойной памяти ассистента.
  *
  * Три слоя хранятся **отдельно**:
- * - [WORKING]   — данные текущей задачи; очищаются вместе с сессией
- * - [LONG_TERM] — профиль и знания; persist между сессиями, почти не очищаются
- * - compressed  — сообщения, вытесненные из LLM-контекста (только для UI)
+ * - [MemoryLayer.WORKING]   — данные текущей задачи; очищаются вместе с сессией
+ * - [MemoryLayer.LONG_TERM] — профиль и знания; persist между сессиями, **никогда не
+ *                             перезаписываются** — только пополняются через [appendLongTerm]
+ *                             и удаляются только через [clearAll]
+ * - compressed              — сообщения, вытесненные из LLM-контекста (только для UI)
  *
- * [SHORT_TERM] не хранится здесь — им управляет [LayeredMemoryStrategy] как
+ * [MemoryLayer.SHORT_TERM] не хранится здесь — им управляет [LayeredMemoryStrategy] как
  * скользящим окном `keepRecentCount` через `_context` агента.
  *
  * Реализации должны быть потокобезопасными.
@@ -32,7 +34,20 @@ interface MemoryStorage {
     /** Возвращает текущие записи долговременной памяти. */
     suspend fun getLongTerm(): List<MemoryEntry>
 
-    /** Полностью заменяет долговременную память новым списком записей. */
+    /**
+     * Добавляет новые записи к долговременной памяти, **не трогая существующие**.
+     *
+     * Из [entries] берутся только записи с ключами, которых ещё нет в хранилище.
+     * Если ключ уже существует — существующая запись **всегда побеждает** (не перезаписывается).
+     *
+     * Удаление записей возможно только через [clearAll].
+     */
+    suspend fun appendLongTerm(entries: List<MemoryEntry>)
+
+    /**
+     * Полностью заменяет долговременную память.
+     * Использовать только в [clearAll] — для обычного обновления см. [appendLongTerm].
+     */
     suspend fun replaceLongTerm(entries: List<MemoryEntry>)
 
     // ==================== Compressed messages (только UI) ====================
@@ -85,6 +100,16 @@ class InMemoryMemoryStorage : MemoryStorage {
     }
 
     override suspend fun getLongTerm(): List<MemoryEntry> = _longTerm
+
+    override suspend fun appendLongTerm(entries: List<MemoryEntry>) {
+        mutex.withLock {
+            val existingKeys = _longTerm.map { it.key }.toSet()
+            val newOnly = entries.filter { it.key !in existingKeys }
+            if (newOnly.isNotEmpty()) {
+                _longTerm = _longTerm + newOnly
+            }
+        }
+    }
 
     override suspend fun replaceLongTerm(entries: List<MemoryEntry>) {
         mutex.withLock { _longTerm = entries }
