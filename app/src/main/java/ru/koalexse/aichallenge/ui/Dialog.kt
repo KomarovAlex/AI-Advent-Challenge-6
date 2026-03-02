@@ -203,10 +203,11 @@ fun BranchSwitchDialog(
 // ==================== Helpers ====================
 
 fun ContextStrategyType.displayName(): String = when (this) {
-    ContextStrategyType.SLIDING_WINDOW -> "Sliding Window"
-    ContextStrategyType.STICKY_FACTS   -> "Sticky Facts"
-    ContextStrategyType.BRANCHING      -> "Branching"
-    ContextStrategyType.SUMMARY        -> "Summary (LLM)"
+    ContextStrategyType.SLIDING_WINDOW  -> "Sliding Window"
+    ContextStrategyType.STICKY_FACTS    -> "Sticky Facts"
+    ContextStrategyType.BRANCHING       -> "Branching"
+    ContextStrategyType.SUMMARY         -> "Summary (LLM)"
+    ContextStrategyType.LAYERED_MEMORY  -> "Layered Memory 🧠"
 }
 
 // ==================== Previews ====================

@@ -1,0 +1,391 @@
+package ru.koalexse.aichallenge.agent.context.strategy
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import ru.koalexse.aichallenge.agent.AgentMessage
+import ru.koalexse.aichallenge.agent.Role
+import ru.koalexse.aichallenge.agent.StatsLLMApi
+import ru.koalexse.aichallenge.agent.context.memory.MemoryEntry
+import ru.koalexse.aichallenge.agent.context.memory.MemoryLayer
+import ru.koalexse.aichallenge.agent.context.memory.MemoryStorage
+import ru.koalexse.aichallenge.domain.ApiMessage
+import ru.koalexse.aichallenge.domain.ChatRequest
+import ru.koalexse.aichallenge.domain.StatsStreamResult
+
+/**
+ * Стратегия «Layered Memory» — явная трёхслойная модель памяти ассистента.
+ *
+ * ## Три слоя памяти
+ *
+ * | Слой | Что хранит | Триггер обновления | В LLM |
+ * |------|-----------|-------------------|-------|
+ * | SHORT_TERM | Последние [keepRecentCount] сообщений | Автоматически (скользящее окно) | ✅ как история |
+ * | WORKING | Текущая задача, шаги, промежуточные результаты | LLM-вызов при вытеснении сообщений | ✅ как system |
+ * | LONG_TERM | Профиль, решения, устойчивые знания | LLM-вызов только по явному запросу | ✅ как system |
+ *
+ * ## Что уходит в LLM-запрос
+ * ```
+ * [system: "Long-term memory: ..."]    ← из getAdditionalSystemMessages()
+ * [system: "Working memory: ..."]      ← из getAdditionalSystemMessages()
+ * [M(n-N+1) … Mn]                      ← SHORT_TERM из _context (recent-окно)
+ * ```
+ *
+ * ## Что видно в UI
+ * ```
+ * 🧠 Long-term memory bubble           ← долговременная память
+ * 💼 Working memory bubble             ← рабочая память
+ * [M1🗜️ … Mk🗜️]                       ← вытесненные сообщения (только UI)
+ * [Mk+1 … Mn]                          ← recent messages
+ * ```
+ *
+ * ## Логика truncate()
+ * 1. `recentMessages` = последние [keepRecentCount] → остаются в `_context` и идут в LLM
+ * 2. `oldMessages` = всё, что за пределами окна → в `compressedMessages` (только UI)
+ * 3. Если `oldMessages.size >= autoRefreshThreshold` → LLM-вызов для WORKING (фоновый)
+ * 4. В LLM уходит: long-term + working (как system) + recent (как история)
+ *
+ * ## Обновление слоёв
+ * - **WORKING** — автоматически в [truncate] + вручную через [refreshWorkingMemory]
+ * - **LONG_TERM** — только вручную через [refreshLongTermMemory] (кнопка в UI)
+ *
+ * ## Capability-паттерн из ViewModel
+ * ```kotlin
+ * (agent.truncationStrategy as? LayeredMemoryStrategy)?.getWorkingMemory()
+ * (agent.truncationStrategy as? LayeredMemoryStrategy)?.getLongTermMemory()
+ * (agent.truncationStrategy as? LayeredMemoryStrategy)?.refreshWorkingMemory(history)
+ * (agent.truncationStrategy as? LayeredMemoryStrategy)?.refreshLongTermMemory(history)
+ * ```
+ *
+ * @param api                  API для LLM-вызовов при обновлении памяти
+ * @param memoryStorage        хранилище всех трёх слоёв (persisted)
+ * @param keepRecentCount      размер SHORT_TERM окна (сообщений в LLM)
+ * @param memoryModel          модель, используемая для извлечения памяти
+ * @param tokenEstimator       функция оценки токенов
+ * @param autoRefreshThreshold минимальный размер вытесняемого блока для автообновления WORKING
+ */
+class LayeredMemoryStrategy(
+    private val api: StatsLLMApi,
+    private val memoryStorage: MemoryStorage,
+    val keepRecentCount: Int = DEFAULT_KEEP_RECENT,
+    private val memoryModel: String,
+    private val tokenEstimator: TokenEstimator = TokenEstimators.default,
+    val autoRefreshThreshold: Int = DEFAULT_AUTO_REFRESH_THRESHOLD
+) : ContextTruncationStrategy {
+
+    init {
+        require(keepRecentCount > 0) { "keepRecentCount must be positive" }
+        require(autoRefreshThreshold > 0) { "autoRefreshThreshold must be positive" }
+    }
+
+    // ==================== ContextTruncationStrategy ====================
+
+    /**
+     * Обрезает историю для LLM-запроса.
+     *
+     * Сообщения за пределами [keepRecentCount] не удаляются навсегда — они
+     * накапливаются в [memoryStorage] как compressed-сообщения (только UI).
+     *
+     * Если вытесняемый блок ≥ [autoRefreshThreshold], запускается фоновый LLM-вызов
+     * для обновления WORKING-памяти. Ошибка проглатывается — основной поток не ломается.
+     *
+     * LONG_TERM автоматически не обновляется — только по явному запросу.
+     */
+    override suspend fun truncate(
+        messages: List<AgentMessage>,
+        maxTokens: Int?,
+        maxMessages: Int?
+    ): List<AgentMessage> {
+        if (messages.isEmpty()) return messages
+
+        val recentMessages = messages.takeLast(keepRecentCount)
+        val oldMessages = messages.dropLast(keepRecentCount)
+
+        if (oldMessages.isNotEmpty()) {
+            // Накапливаем вытесненные сообщения для UI
+            val alreadyCompressed = memoryStorage.getCompressedMessages()
+            memoryStorage.setCompressedMessages(alreadyCompressed + oldMessages)
+
+            // Автообновление WORKING по порогу (аналог autoRefreshThreshold в StickyFacts)
+            // Ошибка LLM при авторефреше не ломает основной поток
+            if (oldMessages.size >= autoRefreshThreshold) {
+                try {
+                    refreshWorkingMemory(oldMessages)
+                } catch (_: Exception) { /* фоновый вызов, ошибка не критична */ }
+            }
+
+            // В _context и LLM уходят только recent
+            var result = recentMessages
+            if (maxMessages != null && result.size > maxMessages) {
+                result = result.takeLast(maxMessages)
+            }
+            if (maxTokens != null) {
+                result = TruncationUtils.truncateByTokens(result, maxTokens, tokenEstimator)
+            }
+            return result
+        }
+
+        // Все сообщения умещаются в keepRecentCount — стандартная обрезка по лимитам
+        var result = messages
+        if (maxMessages != null && result.size > maxMessages) {
+            result = result.takeLast(maxMessages)
+        }
+        if (maxTokens != null) {
+            result = TruncationUtils.truncateByTokens(result, maxTokens, tokenEstimator)
+        }
+        return result
+    }
+
+    /**
+     * Возвращает два system-сообщения для LLM-запроса:
+     * 1. Long-term memory (профиль, знания)
+     * 2. Working memory (текущая задача, шаги)
+     *
+     * Пустые слои пропускаются.
+     */
+    override suspend fun getAdditionalSystemMessages(): List<AgentMessage> {
+        val longTerm = memoryStorage.getLongTerm()
+        val working = memoryStorage.getWorking()
+
+        val result = mutableListOf<AgentMessage>()
+
+        if (longTerm.isNotEmpty()) {
+            val content = buildString {
+                appendLine("Long-term memory (user profile, decisions, knowledge):")
+                longTerm.forEach { entry ->
+                    appendLine("- ${entry.key}: ${entry.value}")
+                }
+            }.trimEnd()
+            result += AgentMessage(role = Role.SYSTEM, content = content)
+        }
+
+        if (working.isNotEmpty()) {
+            val content = buildString {
+                appendLine("Working memory (current task, steps, intermediate results):")
+                working.forEach { entry ->
+                    appendLine("- ${entry.key}: ${entry.value}")
+                }
+            }.trimEnd()
+            result += AgentMessage(role = Role.SYSTEM, content = content)
+        }
+
+        return result
+    }
+
+    /**
+     * Очищает рабочую память и compressed-сообщения.
+     * Долговременная память **намеренно не очищается** при сбросе сессии.
+     * Реализация [ContextTruncationStrategy.clear].
+     */
+    override suspend fun clear() = memoryStorage.clearSession()
+
+    // ==================== Capability: чтение ====================
+
+    /** Возвращает текущую рабочую память. */
+    suspend fun getWorkingMemory(): List<MemoryEntry> = memoryStorage.getWorking()
+
+    /** Возвращает текущую долговременную память. */
+    suspend fun getLongTermMemory(): List<MemoryEntry> = memoryStorage.getLongTerm()
+
+    /** Возвращает сообщения, вытесненные из LLM-контекста (только для UI). */
+    suspend fun getCompressedMessages(): List<AgentMessage> =
+        memoryStorage.getCompressedMessages()
+
+    /** Загружает compressed-сообщения при восстановлении сессии. */
+    suspend fun loadCompressedMessages(messages: List<AgentMessage>) =
+        memoryStorage.setCompressedMessages(messages)
+
+    // ==================== Capability: полная очистка ====================
+
+    /**
+     * Полная очистка всех слоёв памяти, включая долговременную.
+     * Вызывается только по явному запросу пользователя «сбросить всё».
+     */
+    suspend fun clearAllMemory() = memoryStorage.clearAll()
+
+    // ==================== Memory refresh ====================
+
+    /**
+     * LLM-вызов для обновления WORKING-памяти на основе переданных сообщений.
+     *
+     * Используется в двух сценариях:
+     * - **Авто** (внутри [truncate]): `history` = вытесняемые `oldMessages`
+     * - **Ручной** (кнопка 💼 в UI): `history` = текущая active-история
+     *
+     * LLM получает: существующие записи WORKING + переданные сообщения
+     * → мёрджит → сохраняет в [memoryStorage].
+     *
+     * @return обновлённый список записей WORKING-памяти
+     */
+    suspend fun refreshWorkingMemory(history: List<AgentMessage>): List<MemoryEntry> =
+        withContext(Dispatchers.IO) {
+            if (history.isEmpty()) return@withContext memoryStorage.getWorking()
+
+            val conversationText = buildConversationText(history)
+            val existingEntries = memoryStorage.getWorking()
+            val existingText = buildExistingEntriesText(existingEntries)
+
+            val request = buildMemoryRequest(
+                systemPrompt = WORKING_MEMORY_EXTRACTION_PROMPT,
+                existingText = existingText,
+                conversationText = conversationText
+            )
+
+            val response = collectLLMResponse(request)
+            val newEntries = parseMemoryResponse(response, MemoryLayer.WORKING)
+            memoryStorage.replaceWorking(newEntries)
+            newEntries
+        }
+
+    /**
+     * LLM-вызов для обновления LONG_TERM-памяти на основе переданных сообщений.
+     *
+     * Вызывается **только вручную** (кнопка 🧠 в UI) — долговременная память
+     * не обновляется автоматически, чтобы избежать нежелательных изменений профиля.
+     *
+     * LLM получает: существующие записи LONG_TERM + переданные сообщения
+     * → мёрджит → сохраняет в [memoryStorage].
+     *
+     * @return обновлённый список записей LONG_TERM-памяти
+     */
+    suspend fun refreshLongTermMemory(history: List<AgentMessage>): List<MemoryEntry> =
+        withContext(Dispatchers.IO) {
+            if (history.isEmpty()) return@withContext memoryStorage.getLongTerm()
+
+            val conversationText = buildConversationText(history)
+            val existingEntries = memoryStorage.getLongTerm()
+            val existingText = buildExistingEntriesText(existingEntries)
+
+            val request = buildMemoryRequest(
+                systemPrompt = LONG_TERM_MEMORY_EXTRACTION_PROMPT,
+                existingText = existingText,
+                conversationText = conversationText
+            )
+
+            val response = collectLLMResponse(request)
+            val newEntries = parseMemoryResponse(response, MemoryLayer.LONG_TERM)
+            memoryStorage.replaceLongTerm(newEntries)
+            newEntries
+        }
+
+    // ==================== Private ====================
+
+    private fun buildConversationText(history: List<AgentMessage>): String =
+        history.joinToString("\n") { msg ->
+            val role = when (msg.role) {
+                Role.USER      -> "User"
+                Role.ASSISTANT -> "Assistant"
+                Role.SYSTEM    -> "System"
+            }
+            "$role: ${msg.content}"
+        }
+
+    private fun buildExistingEntriesText(entries: List<MemoryEntry>): String =
+        if (entries.isEmpty()) "No entries yet."
+        else entries.joinToString("\n") { "- ${it.key}: ${it.value}" }
+
+    private fun buildMemoryRequest(
+        systemPrompt: String,
+        existingText: String,
+        conversationText: String
+    ): ChatRequest = ChatRequest(
+        messages = listOf(
+            ApiMessage(role = "system", content = systemPrompt),
+            ApiMessage(
+                role = "user",
+                content = buildString {
+                    appendLine("Existing entries:")
+                    appendLine(existingText)
+                    appendLine()
+                    appendLine("Recent conversation:")
+                    append(conversationText)
+                }
+            )
+        ),
+        model = memoryModel,
+        temperature = 0.2f,
+        max_tokens = 800L
+    )
+
+    private suspend fun collectLLMResponse(request: ChatRequest): String {
+        val builder = StringBuilder()
+        api.sendMessageStream(request).collect { result ->
+            if (result is StatsStreamResult.Content) builder.append(result.text)
+        }
+        return builder.toString().trim()
+    }
+
+    /**
+     * Парсит ответ LLM формата:
+     * ```
+     * key1: value1
+     * key2: value2
+     * ```
+     */
+    private fun parseMemoryResponse(response: String, layer: MemoryLayer): List<MemoryEntry> {
+        if (response.equals("NO_ENTRIES", ignoreCase = true)) return emptyList()
+        val now = System.currentTimeMillis()
+        return response.lines()
+            .mapNotNull { line ->
+                val cleaned = line.trimStart('-', '*', '•', ' ')
+                val colonIdx = cleaned.indexOf(':')
+                if (colonIdx > 0) {
+                    val key = cleaned.substring(0, colonIdx).trim()
+                    val value = cleaned.substring(colonIdx + 1).trim()
+                    if (key.isNotEmpty() && value.isNotEmpty()) {
+                        MemoryEntry(key = key, value = value, layer = layer, updatedAt = now)
+                    } else null
+                } else null
+            }
+    }
+
+    companion object {
+        const val DEFAULT_KEEP_RECENT = 10
+        const val DEFAULT_AUTO_REFRESH_THRESHOLD = 2
+
+        /** Промпт для обновления WORKING-памяти (текущая задача). */
+        private const val WORKING_MEMORY_EXTRACTION_PROMPT =
+            """You are a working memory extractor for an AI assistant. Your task is to maintain a key-value list of the CURRENT TASK data from the conversation.
+
+Focus on:
+- Current task goal and subgoals
+- Task steps and their status (pending/done/in-progress)
+- Intermediate results and computed values
+- Active constraints and requirements
+- Open questions or blockers
+
+Instructions:
+- Merge with existing entries — update changed values, keep relevant ones, remove completed/outdated ones
+- Keep entries concise (one line per entry)
+- Use short descriptive keys (e.g. "current task", "step 1 status", "result variable X")
+- Write in the same language as the conversation
+- If a task is fully completed, you may clear task-specific entries
+
+Respond ONLY with entries in this format (one per line):
+key: value
+
+If there is nothing task-specific to remember, respond with exactly: NO_ENTRIES"""
+
+        /** Промпт для обновления LONG_TERM-памяти (профиль пользователя). */
+        private const val LONG_TERM_MEMORY_EXTRACTION_PROMPT =
+            """You are a long-term memory extractor for an AI assistant. Your task is to maintain a key-value list of PERSISTENT facts about the user.
+
+Focus on:
+- User profile (name, role, expertise level)
+- Stable preferences (language, style, tools, frameworks)
+- Important decisions made by the user
+- Long-term goals and projects
+- Recurring patterns and preferences
+
+Instructions:
+- Merge with existing entries — update changed values, keep stable ones, remove only clearly outdated ones
+- Be conservative — only add what is clearly stated and likely to be useful long-term
+- Keep entries concise (one line per entry)
+- Use short descriptive keys (e.g. "name", "preferred language", "main project", "expertise")
+- Write in the same language as the conversation
+
+Respond ONLY with entries in this format (one per line):
+key: value
+
+If there is nothing persistent to remember, respond with exactly: NO_ENTRIES"""
+    }
+}

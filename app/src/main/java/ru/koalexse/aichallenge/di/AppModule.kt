@@ -10,6 +10,7 @@ import ru.koalexse.aichallenge.agent.buildAgent
 import ru.koalexse.aichallenge.agent.context.SimpleAgentContext
 import ru.koalexse.aichallenge.agent.context.strategy.BranchingStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
+import ru.koalexse.aichallenge.agent.context.strategy.LayeredMemoryStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.SlidingWindowStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.StickyFactsStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.SummaryTruncationStrategy
@@ -24,6 +25,7 @@ import ru.koalexse.aichallenge.data.persistence.ChatHistoryRepository
 import ru.koalexse.aichallenge.data.persistence.JsonBranchStorage
 import ru.koalexse.aichallenge.data.persistence.JsonChatHistoryRepository
 import ru.koalexse.aichallenge.data.persistence.JsonFactsStorage
+import ru.koalexse.aichallenge.data.persistence.JsonMemoryStorage
 import ru.koalexse.aichallenge.ui.AgentChatViewModel
 import ru.koalexse.aichallenge.ui.state.ContextStrategyType
 
@@ -34,7 +36,7 @@ import ru.koalexse.aichallenge.ui.state.ContextStrategyType
  *   UI → Agent → domain
  *   UI → data  → domain
  *   data реализует agent.StatsLLMApi  ✅
- *   ViewModel не знает о SummaryStorage / FactsStorage / BranchStorage — только об Agent ✅
+ *   ViewModel не знает о SummaryStorage / FactsStorage / BranchStorage / MemoryStorage — только об Agent ✅
  */
 class AppModule(
     private val context: Context,
@@ -82,7 +84,6 @@ class AppModule(
             factsStorage = JsonFactsStorage(context),
             factsModel = defaultModel,
             // autoRefreshThreshold = 2 (по умолчанию) — один полный обмен user+assistant.
-            // Увеличьте если хотите реже обновлять факты (экономия токенов).
         )
 
         ContextStrategyType.BRANCHING -> BranchingStrategy(
@@ -92,6 +93,14 @@ class AppModule(
         ContextStrategyType.SUMMARY -> SummaryTruncationStrategy(
             summaryProvider = LLMSummaryProvider(api = statsLLMApi, model = defaultModel),
             summaryStorage = JsonSummaryStorage(context)
+        )
+
+        ContextStrategyType.LAYERED_MEMORY -> LayeredMemoryStrategy(
+            api = statsLLMApi,
+            memoryStorage = JsonMemoryStorage(context),
+            memoryModel = defaultModel,
+            // keepRecentCount = 10 (по умолчанию) — размер SHORT_TERM окна
+            // autoRefreshThreshold = 2 (по умолчанию) — триггер авторефреша WORKING
         )
     }
 

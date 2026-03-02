@@ -68,7 +68,6 @@ data class Message(
 
 ```kotlin
 // data/persistence/ChatHistoryRepository.kt
-// Намеренно в data/ — оперирует persistence-моделями (ChatSession, Persisted*)
 interface ChatHistoryRepository {
     suspend fun saveSession(session: ChatSession)
     suspend fun loadSession(sessionId: String): ChatSession?
@@ -96,15 +95,42 @@ data class ChatSession(
     val sessionStats: PersistedSessionStats? = null,
     val summaries: List<PersistedSummary> = emptyList()
 )
-
-data class PersistedSummary(
-    val content: String,
-    val originalMessages: List<PersistedAgentMessage>,
-    val createdAt: Long
-)
 ```
 
 `ChatHistoryMapper` — конвертеры `ChatSession` ↔ `AgentMessage` / `ConversationSummary`.
+
+## JsonMemoryStorage — персистенция LayeredMemory
+
+Три **отдельных** файла, каждый со своим `Mutex`:
+
+| Файл | Слой | Очищается при `clearSession`? |
+|------|------|-------------------------------|
+| `memory_working.json` | WORKING | ✅ да |
+| `memory_long_term.json` | LONG_TERM | ❌ нет (persist между сессиями) |
+| `memory_compressed.json` | compressed UI | ✅ да |
+
+Структура каждого файла:
+```json
+{
+  "version": 1,
+  "entries": [
+    { "key": "current task", "value": "реализовать LayeredMemory", "layer": "WORKING", "updatedAt": 0 }
+  ]
+}
+```
+
+Compressed-файл:
+```json
+{
+  "version": 1,
+  "messages": [
+    { "role": "user", "content": "Привет!", "timestamp": 0 }
+  ]
+}
+```
+
+Данные загружаются лениво при первом обращении и кэшируются. Три независимых `Mutex`
+позволяют читать LONG_TERM и писать WORKING одновременно без лишних блокировок.
 
 ## Файлы данных
 
@@ -112,6 +138,11 @@ data class PersistedSummary(
 |------|--------------------|------------|
 | `chat_history.json` | `files/chat_history.json` | Сессии + сообщения + summaries |
 | `summaries.json` | `files/summaries.json` | Summaries (кэш для быстрой загрузки) |
+| `facts.json` | `files/facts.json` | Key-value факты (StickyFacts) |
+| `branches.json` | `files/branches.json` | Ветки диалога (Branching) |
+| `memory_working.json` | `files/memory_working.json` | Рабочая память (LayeredMemory) |
+| `memory_long_term.json` | `files/memory_long_term.json` | Долговременная память (LayeredMemory) |
+| `memory_compressed.json` | `files/memory_compressed.json` | Вытесненные сообщения для UI (LayeredMemory) |
 
 ## Конфигурация (local.properties)
 

@@ -16,8 +16,10 @@ import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.AgentStreamEvent
 import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
 import ru.koalexse.aichallenge.agent.context.facts.Fact
+import ru.koalexse.aichallenge.agent.context.memory.MemoryEntry
 import ru.koalexse.aichallenge.agent.context.strategy.BranchingStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
+import ru.koalexse.aichallenge.agent.context.strategy.LayeredMemoryStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.StickyFactsStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.SummaryTruncationStrategy
 import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
@@ -81,6 +83,12 @@ class AgentChatViewModel(
         val isBranchLimitReached: Boolean = false,
         val isSwitchingBranch: Boolean = false,
         val isBranchDialogOpen: Boolean = false,
+        // Layered Memory
+        val workingMemory: List<MemoryEntry> = emptyList(),
+        val longTermMemory: List<MemoryEntry> = emptyList(),
+        val memoryCompressedMessages: List<AgentMessage> = emptyList(),
+        val isRefreshingWorkingMemory: Boolean = false,
+        val isRefreshingLongTermMemory: Boolean = false,
         // Strategy
         val activeStrategy: ContextStrategyType
     )
@@ -120,6 +128,10 @@ class AgentChatViewModel(
     private val branchingStrategy: BranchingStrategy?
         get() = agent.truncationStrategy as? BranchingStrategy
 
+    /** Доступ к layered memory-стратегии без знания конкретного типа в остальном коде. */
+    private val layeredMemoryStrategy: LayeredMemoryStrategy?
+        get() = agent.truncationStrategy as? LayeredMemoryStrategy
+
     // ==================== UI State ====================
 
     private fun buildUiState(): ChatUiState {
@@ -127,11 +139,17 @@ class AgentChatViewModel(
 
         val compressedMessages = internal.summaries.toCompressedUiMessages()
 
-        // Compressed-сообщения StickyFactsStrategy — вытеснены из LLM-контекста,
-        // показываются в UI с пометкой «сжатые», в LLM не идут
+        // Compressed-сообщения StickyFactsStrategy
         val factsCompressedMessages =
             if (internal.activeStrategy == ContextStrategyType.STICKY_FACTS)
                 internal.factsCompressedMessages.toFactsCompressedUiMessages()
+            else
+                emptyList()
+
+        // Compressed-сообщения LayeredMemoryStrategy
+        val memoryCompressedMessages =
+            if (internal.activeStrategy == ContextStrategyType.LAYERED_MEMORY)
+                internal.memoryCompressedMessages.toMemoryCompressedUiMessages()
             else
                 emptyList()
 
@@ -141,14 +159,35 @@ class AgentChatViewModel(
         )
         val streamingMessages = listOfNotNull(internal.streamingMessage?.toUiMessage())
 
-        // Факты — отдельный бабл в начале ленты
+        // Факты StickyFacts — bubble в начале ленты
         val factsMessages = if (
             internal.activeStrategy == ContextStrategyType.STICKY_FACTS &&
             internal.facts.isNotEmpty()
         ) listOf(buildFactsMessage(internal.facts)) else emptyList()
 
+        // Layered Memory — два bubble: 🧠 Long-term сверху, 💼 Working под ним
+        val longTermMemoryMessages = if (internal.activeStrategy == ContextStrategyType.LAYERED_MEMORY)
+            listOfNotNull(internal.longTermMemory.toLongTermMemoryUiMessage())
+        else emptyList()
+
+        val workingMemoryMessages = if (internal.activeStrategy == ContextStrategyType.LAYERED_MEMORY)
+            listOfNotNull(internal.workingMemory.toWorkingMemoryUiMessage())
+        else emptyList()
+
+        // Порядок сверху вниз в ленте (список перевёрнут в LazyColumn с reverseLayout):
+        // long-term → working → memory-compressed → facts-compressed → summaries-compressed → history → streaming
+        val allMessages =
+            longTermMemoryMessages +
+            workingMemoryMessages +
+            memoryCompressedMessages +
+            factsMessages +
+            factsCompressedMessages +
+            compressedMessages +
+            historyMessages +
+            streamingMessages
+
         return ChatUiState(
-            messages = factsMessages + factsCompressedMessages + compressedMessages + historyMessages + streamingMessages,
+            messages = allMessages,
             availableModels = availableModels,
             settingsData = internal.settingsData,
             currentInput = internal.currentInput,
@@ -156,7 +195,7 @@ class AgentChatViewModel(
             isSettingsOpen = internal.isSettingsOpen,
             error = internal.error,
             sessionStats = internal.sessionStats.takeIf { it.messageCount > 0 },
-            compressedMessageCount = compressedMessages.size + factsCompressedMessages.size,
+            compressedMessageCount = compressedMessages.size + factsCompressedMessages.size + memoryCompressedMessages.size,
             activeStrategy = internal.activeStrategy,
             facts = internal.facts,
             isRefreshingFacts = internal.isRefreshingFacts,
@@ -164,7 +203,12 @@ class AgentChatViewModel(
             activeBranchId = internal.activeBranchId,
             isBranchLimitReached = internal.isBranchLimitReached,
             isSwitchingBranch = internal.isSwitchingBranch,
-            isBranchDialogOpen = internal.isBranchDialogOpen
+            isBranchDialogOpen = internal.isBranchDialogOpen,
+            workingMemory = internal.workingMemory,
+            longTermMemory = internal.longTermMemory,
+            memoryCompressedMessages = internal.memoryCompressedMessages,
+            isRefreshingWorkingMemory = internal.isRefreshingWorkingMemory,
+            isRefreshingLongTermMemory = internal.isRefreshingLongTermMemory
         )
     }
 
@@ -190,6 +234,10 @@ class AgentChatViewModel(
             ChatIntent.OpenBranchDialog ->
                 _internalState.update { it.copy(isBranchDialogOpen = !it.isBranchDialogOpen) }
             is ChatIntent.SwitchBranch -> switchBranch(intent.branchId)
+            // Layered Memory
+            ChatIntent.RefreshWorkingMemory  -> refreshWorkingMemory()
+            ChatIntent.RefreshLongTermMemory -> refreshLongTermMemory()
+            ChatIntent.ClearAllMemory        -> clearAllMemory()
         }
     }
 
@@ -220,22 +268,29 @@ class AgentChatViewModel(
                     val newSummaries = summaryStrategy?.getSummaries() ?: emptyList()
                     val newBranches  = agent.getBranches()
                     val newActiveId  = agent.getActiveBranchId()
-                    // Синхронизируем факты и compressed — truncate() внутри агента мог
-                    // запустить авторефреш фактов и добавить новые compressed-сообщения
+                    // StickyFacts — синхронизация после авторефреша в truncate()
                     val newFacts           = factsStrategy?.getFacts() ?: emptyList()
                     val newFactsCompressed = factsStrategy?.getCompressedMessages() ?: emptyList()
+                    // LayeredMemory — синхронизация после авторефреша WORKING в truncate()
+                    val newWorking            = layeredMemoryStrategy?.getWorkingMemory() ?: emptyList()
+                    val newLongTerm           = layeredMemoryStrategy?.getLongTermMemory() ?: emptyList()
+                    val newMemoryCompressed   = layeredMemoryStrategy?.getCompressedMessages() ?: emptyList()
+
                     _internalState.update { state ->
                         state.copy(
                             streamingMessage = state.streamingMessage?.copy(
                                 tokenStats = event.tokenStats,
                                 responseDurationMs = event.durationMs
                             ),
-                            sessionStats           = state.sessionStats.add(event.tokenStats),
-                            summaries              = newSummaries,
-                            facts                  = newFacts,
-                            factsCompressedMessages = newFactsCompressed,
-                            branches               = newBranches,
-                            activeBranchId         = newActiveId
+                            sessionStats              = state.sessionStats.add(event.tokenStats),
+                            summaries                 = newSummaries,
+                            facts                     = newFacts,
+                            factsCompressedMessages   = newFactsCompressed,
+                            branches                  = newBranches,
+                            activeBranchId            = newActiveId,
+                            workingMemory             = newWorking,
+                            longTermMemory            = newLongTerm,
+                            memoryCompressedMessages  = newMemoryCompressed
                         )
                     }
                 }
@@ -316,7 +371,10 @@ class AgentChatViewModel(
                 isBranchLimitReached = false,
                 streamingMessage = null,
                 lastMessageStats = null,
-                lastMessageDuration = null
+                lastMessageDuration = null,
+                workingMemory = emptyList(),
+                longTermMemory = emptyList(),
+                memoryCompressedMessages = emptyList()
             )
         }
 
@@ -350,6 +408,19 @@ class AgentChatViewModel(
                 _internalState.update { it.copy(summaries = savedSummaries) }
             }
 
+            ContextStrategyType.LAYERED_MEMORY -> {
+                val savedWorking    = layeredMemoryStrategy?.getWorkingMemory() ?: emptyList()
+                val savedLongTerm   = layeredMemoryStrategy?.getLongTermMemory() ?: emptyList()
+                val savedCompressed = layeredMemoryStrategy?.getCompressedMessages() ?: emptyList()
+                _internalState.update {
+                    it.copy(
+                        workingMemory            = savedWorking,
+                        longTermMemory           = savedLongTerm,
+                        memoryCompressedMessages = savedCompressed
+                    )
+                }
+            }
+
             ContextStrategyType.SLIDING_WINDOW -> { /* ничего специфичного */ }
         }
 
@@ -375,20 +446,27 @@ class AgentChatViewModel(
                 newActiveBranchId = null
             }
 
+            // При сбросе LayeredMemory: рабочая и compressed очищаются,
+            // долговременная — остаётся (clearSession в MemoryStorage)
+            val longTermAfterClear = layeredMemoryStrategy?.getLongTermMemory() ?: emptyList()
+
             _internalState.update {
                 it.copy(
-                    currentSessionId        = currentSessionId,
-                    streamingMessage        = null,
-                    lastMessageStats        = null,
-                    lastMessageDuration     = null,
-                    error                   = null,
-                    sessionStats            = SessionTokenStats(),
-                    summaries               = emptyList(),
-                    facts                   = emptyList(),
-                    factsCompressedMessages = emptyList(),
-                    branches                = newBranches,
-                    activeBranchId          = newActiveBranchId,
-                    isBranchLimitReached    = false
+                    currentSessionId         = currentSessionId,
+                    streamingMessage         = null,
+                    lastMessageStats         = null,
+                    lastMessageDuration      = null,
+                    error                    = null,
+                    sessionStats             = SessionTokenStats(),
+                    summaries                = emptyList(),
+                    facts                    = emptyList(),
+                    factsCompressedMessages  = emptyList(),
+                    branches                 = newBranches,
+                    activeBranchId           = newActiveBranchId,
+                    isBranchLimitReached     = false,
+                    workingMemory            = emptyList(),
+                    longTermMemory           = longTermAfterClear,  // persist!
+                    memoryCompressedMessages = emptyList()
                 )
             }
             chatHistoryRepository?.clearAll()
@@ -402,8 +480,6 @@ class AgentChatViewModel(
         _internalState.update { it.copy(isRefreshingFacts = true, error = null) }
         viewModelScope.launch {
             try {
-                // agent.conversationHistory содержит только recent-сообщения —
-                // вытесненные уже в factsStorage и учтены в существующих фактах
                 val updatedFacts = factsStrategy?.refreshFacts(agent.conversationHistory)
                     ?: emptyList()
                 val compressed = factsStrategy?.getCompressedMessages() ?: emptyList()
@@ -418,6 +494,84 @@ class AgentChatViewModel(
             } catch (e: Exception) {
                 _internalState.update {
                     it.copy(isRefreshingFacts = false, error = e.message ?: "Failed to refresh facts")
+                }
+            }
+        }
+    }
+
+    // ==================== Layered Memory ====================
+
+    /**
+     * Обновляет WORKING-память вручную (кнопка 💼 в UI).
+     * Использует текущую active-историю агента.
+     */
+    private fun refreshWorkingMemory() {
+        if (_internalState.value.isRefreshingWorkingMemory) return
+        _internalState.update { it.copy(isRefreshingWorkingMemory = true, error = null) }
+        viewModelScope.launch {
+            try {
+                val updated = layeredMemoryStrategy?.refreshWorkingMemory(agent.conversationHistory)
+                    ?: emptyList()
+                _internalState.update {
+                    it.copy(workingMemory = updated, isRefreshingWorkingMemory = false)
+                }
+                saveHistory()
+            } catch (e: Exception) {
+                _internalState.update {
+                    it.copy(
+                        isRefreshingWorkingMemory = false,
+                        error = e.message ?: "Failed to refresh working memory"
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Обновляет LONG_TERM-память вручную (кнопка 🧠 в UI).
+     * Использует текущую active-историю агента.
+     * Долговременная память обновляется **только** по явному запросу.
+     */
+    private fun refreshLongTermMemory() {
+        if (_internalState.value.isRefreshingLongTermMemory) return
+        _internalState.update { it.copy(isRefreshingLongTermMemory = true, error = null) }
+        viewModelScope.launch {
+            try {
+                val updated = layeredMemoryStrategy?.refreshLongTermMemory(agent.conversationHistory)
+                    ?: emptyList()
+                _internalState.update {
+                    it.copy(longTermMemory = updated, isRefreshingLongTermMemory = false)
+                }
+                saveHistory()
+            } catch (e: Exception) {
+                _internalState.update {
+                    it.copy(
+                        isRefreshingLongTermMemory = false,
+                        error = e.message ?: "Failed to refresh long-term memory"
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Полная очистка всей памяти, включая долговременную.
+     * Вызывается только по явному запросу пользователя.
+     */
+    private fun clearAllMemory() {
+        viewModelScope.launch {
+            try {
+                layeredMemoryStrategy?.clearAllMemory()
+                _internalState.update {
+                    it.copy(
+                        workingMemory            = emptyList(),
+                        longTermMemory           = emptyList(),
+                        memoryCompressedMessages = emptyList()
+                    )
+                }
+            } catch (e: Exception) {
+                _internalState.update {
+                    it.copy(error = e.message ?: "Failed to clear memory")
                 }
             }
         }
@@ -529,8 +683,7 @@ class AgentChatViewModel(
                 }
             }
 
-            // Загружаем факты и compressed-сообщения через capability accessor.
-            // JsonFactsStorage уже восстановил оба списка из facts.json при первом обращении.
+            // StickyFacts: загружаем через capability accessor
             val savedFacts = factsStrategy?.getFacts() ?: emptyList()
             val savedCompressed = factsStrategy?.getCompressedMessages() ?: emptyList()
             if (savedFacts.isNotEmpty() || savedCompressed.isNotEmpty()) {
@@ -538,6 +691,21 @@ class AgentChatViewModel(
                     it.copy(
                         facts = savedFacts,
                         factsCompressedMessages = savedCompressed
+                    )
+                }
+            }
+
+            // LayeredMemory: загружаем все три слоя через capability accessor.
+            // JsonMemoryStorage восстанавливает данные из файлов при первом обращении.
+            val savedWorking    = layeredMemoryStrategy?.getWorkingMemory() ?: emptyList()
+            val savedLongTerm   = layeredMemoryStrategy?.getLongTermMemory() ?: emptyList()
+            val savedMemCompr   = layeredMemoryStrategy?.getCompressedMessages() ?: emptyList()
+            if (savedWorking.isNotEmpty() || savedLongTerm.isNotEmpty() || savedMemCompr.isNotEmpty()) {
+                _internalState.update {
+                    it.copy(
+                        workingMemory            = savedWorking,
+                        longTermMemory           = savedLongTerm,
+                        memoryCompressedMessages = savedMemCompr
                     )
                 }
             }
@@ -613,4 +781,8 @@ sealed class ChatIntent {
     data object CreateCheckpoint : ChatIntent()
     data object OpenBranchDialog : ChatIntent()
     data class SwitchBranch(val branchId: String) : ChatIntent()
+    // Layered Memory
+    data object RefreshWorkingMemory  : ChatIntent()
+    data object RefreshLongTermMemory : ChatIntent()
+    data object ClearAllMemory        : ChatIntent()
 }

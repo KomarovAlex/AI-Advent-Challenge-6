@@ -24,7 +24,8 @@ app/src/main/java/ru/koalexse/aichallenge/
 │       │   ├── SummaryTruncationStrategy.kt
 │       │   ├── SlidingWindowStrategy.kt          # Стратегия 1: последние N сообщений
 │       │   ├── StickyFactsStrategy.kt            # Стратегия 2: key-value факты + N сообщений
-│       │   └── BranchingStrategy.kt              # Стратегия 3: ветки диалога
+│       │   ├── BranchingStrategy.kt              # Стратегия 3: ветки диалога
+│       │   └── LayeredMemoryStrategy.kt          # Стратегия 5: трёхслойная модель памяти
 │       ├── summary/
 │       │   ├── SummaryModels.kt    # ConversationSummary
 │       │   ├── SummaryStorage.kt   # + InMemorySummaryStorage
@@ -34,9 +35,12 @@ app/src/main/java/ru/koalexse/aichallenge/
 │       ├── facts/
 │       │   ├── FactsModels.kt      # Fact (key, value, updatedAt)
 │       │   └── FactsStorage.kt     # interface + InMemoryFactsStorage
-│       └── branch/
-│           ├── BranchModels.kt     # DialogBranch (id, name, messages, summaries)
-│           └── BranchStorage.kt    # interface + InMemoryBranchStorage
+│       ├── branch/
+│       │   ├── BranchModels.kt     # DialogBranch (id, name, messages, summaries)
+│       │   └── BranchStorage.kt    # interface + InMemoryBranchStorage
+│       └── memory/
+│           ├── MemoryModels.kt     # MemoryEntry, MemoryLayer, LayeredMemorySnapshot
+│           └── MemoryStorage.kt    # interface + InMemoryMemoryStorage
 ├── data/
 │   ├── Api.kt                      # interface LLMApi + class OpenAIApi
 │   ├── StatsTrackingLLMApi.kt      # реализует agent.StatsLLMApi
@@ -46,18 +50,21 @@ app/src/main/java/ru/koalexse/aichallenge/
 │       ├── ChatHistoryRepository.kt
 │       ├── JsonChatHistoryRepository.kt
 │       ├── JsonFactsStorage.kt     # Персистенция фактов → facts.json
-│       └── JsonBranchStorage.kt    # Персистенция веток → branches.json
+│       ├── JsonBranchStorage.kt    # Персистенция веток → branches.json
+│       └── JsonMemoryStorage.kt    # Персистенция памяти → memory_working.json,
+│                                   #   memory_long_term.json, memory_compressed.json
 ├── domain/
 │   └── Models.kt                   # Message, TokenStats, ChatRequest, ApiMessage
 ├── di/
-│   └── AppModule.kt                # AppModule, AppContainer (4 фабричных метода)
+│   └── AppModule.kt                # AppModule, AppContainer (5 стратегий в buildStrategy)
 └── ui/
-    ├── AgentChatViewModel.kt       # ViewModel + ChatIntent (+ RefreshFacts, Checkpoint, Branch)
-    ├── AgentMessageUiMapper.kt     # AgentMessage/ConversationSummary → Message
-    ├── ChatScreen.kt               # MessageBubble, CompressedMessageBubble, FactsBubble
+    ├── AgentChatViewModel.kt       # ViewModel + ChatIntent (+ RefreshWorking/LongTerm Memory)
+    ├── AgentMessageUiMapper.kt     # AgentMessage/ConversationSummary/MemoryEntry → Message
+    ├── ChatScreen.kt               # MessageBubble, CompressedMessageBubble, FactsBubble,
+    │                               #   WorkingMemoryBubble, LongTermMemoryBubble
     ├── Dialog.kt                   # MultiFieldInputDialog (+ стратегия), BranchSwitchDialog
     └── state/
-        └── ChatUiState.kt          # ChatUiState, SettingsData, ContextStrategyType
+        └── ChatUiState.kt          # ChatUiState, SettingsData, ContextStrategyType (+ LAYERED_MEMORY)
 ```
 
 ## 📚 Документация
@@ -66,7 +73,7 @@ app/src/main/java/ru/koalexse/aichallenge/
 |------|------------|
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Схемы, поток данных, разделение ответственности |
 | [docs/AGENT.md](./docs/AGENT.md) | Agent, SimpleLLMAgent, AgentContext, buildMessageList |
-| [docs/COMPRESSION.md](./docs/COMPRESSION.md) | Стратегии (все 4), TruncationUtils, SummaryStorage, Facts, Branches |
+| [docs/COMPRESSION.md](./docs/COMPRESSION.md) | Стратегии (все 5), TruncationUtils, SummaryStorage, Facts, Branches, LayeredMemory |
 | [docs/DATA_LAYER.md](./docs/DATA_LAYER.md) | API, persistence, domain-модели |
 | [docs/UI_LAYER.md](./docs/UI_LAYER.md) | ViewModel, MVI, ChatUiState, AgentMessageUiMapper |
 | [docs/RECIPES.md](./docs/RECIPES.md) | Быстрый старт, типичные задачи, тесты |
@@ -79,3 +86,6 @@ app/src/main/java/ru/koalexse/aichallenge/
 | `summaries.json` | Summaries (кэш, Summary-стратегия) |
 | `facts.json` | Key-value факты (StickyFacts-стратегия) |
 | `branches.json` | Ветки диалога (Branching-стратегия) |
+| `memory_working.json` | Рабочая память — текущая задача, шаги, результаты (LayeredMemory) |
+| `memory_long_term.json` | Долговременная память — профиль, решения, знания (LayeredMemory) |
+| `memory_compressed.json` | Сообщения, вытесненные из LLM-контекста (только UI, LayeredMemory) |

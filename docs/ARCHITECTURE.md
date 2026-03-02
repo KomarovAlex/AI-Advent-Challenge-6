@@ -48,7 +48,7 @@ ChatIntent
     → ViewModel.handleIntent()
     → agent.send(message)
     → SimpleLLMAgent.chatStream()
-        → buildMessageList()          [system] + [summaries/facts] + [history]
+        → buildMessageList()          [system] + [memory layers] + [history]
         → api.sendMessageStream()     OkHttp SSE
         → Flow<StatsStreamResult>
     → Flow<AgentStreamEvent>
@@ -67,6 +67,7 @@ ChatIntent
 | `SummaryStorage` | Хранилище summaries (`Mutex` + IO) — деталь стратегии |
 | `FactsStorage` | Хранилище фактов — деталь стратегии |
 | `BranchStorage` | Хранилище веток — деталь стратегии |
+| `MemoryStorage` | Хранилище трёх слоёв памяти — деталь LayeredMemoryStrategy |
 | `Agent` | Инкапсуляция истории, отправка запросов, делегирование стратегии |
 | `ContextTruncationStrategy` | Логика обрезки, компрессии, очистки своего состояния |
 | `ViewModel` | MVI: Intent → State, capability accessors для стратегий |
@@ -93,16 +94,19 @@ ChatIntent
 
 ```
 Снаружи через Capability pattern (ViewModel):
-  summaryStrategy?.getSummaries()  ←──  summaryStorage.getSummaries()
-  summaryStrategy?.loadSummaries() ──►  summaryStorage.loadSummaries()
-  factsStrategy?.getFacts()        ←──  factsStorage.getFacts()
-  factsStrategy?.refreshFacts()    ──►  LLM call + factsStorage.replaceFacts()
-  factsStrategy?.loadFacts()       ──►  factsStorage.replaceFacts()
+  summaryStrategy?.getSummaries()       ←──  summaryStorage.getSummaries()
+  summaryStrategy?.loadSummaries()      ──►  summaryStorage.loadSummaries()
+  factsStrategy?.getFacts()             ←──  factsStorage.getFacts()
+  factsStrategy?.refreshFacts()         ──►  LLM call + factsStorage.replaceFacts()
+  layeredMemoryStrategy?.getWorkingMemory()   ←──  memoryStorage.getWorking()
+  layeredMemoryStrategy?.getLongTermMemory()  ←──  memoryStorage.getLongTerm()
+  layeredMemoryStrategy?.refreshWorkingMemory()  ──►  LLM call + memoryStorage.replaceWorking()
+  layeredMemoryStrategy?.refreshLongTermMemory() ──►  LLM call + memoryStorage.replaceLongTerm()
 ```
 
 ---
 
-## ISP: почему branches в Agent, а summaries/facts — нет
+## ISP: почему branches в Agent, а summaries/facts/memory — нет
 
 | Операция | Требует синхронизации `_context`? | Где |
 |----------|-----------------------------------|-----|
@@ -110,30 +114,17 @@ ChatIntent
 | `initBranches` | ✅ да — `_context.replaceHistory(activeBranch.messages)` | `Agent` |
 | `createCheckpoint` | ✅ да — читает `_context.getHistory()` | `Agent` |
 | `getSummaries` | ❌ нет — чистый I/O со storage | `truncationStrategy as? Summary...` |
-| `loadSummaries` | ❌ нет — чистый I/O со storage | `truncationStrategy as? Summary...` |
 | `getFacts` | ❌ нет — чистый I/O со storage | `truncationStrategy as? StickyFacts...` |
-| `refreshFacts` | ❌ нет — LLM-вызов + I/O | `truncationStrategy as? StickyFacts...` |
+| `getWorkingMemory` | ❌ нет — чистый I/O со storage | `truncationStrategy as? LayeredMemory...` |
+| `getLongTermMemory` | ❌ нет — чистый I/O со storage | `truncationStrategy as? LayeredMemory...` |
+| `refreshWorkingMemory` | ❌ нет — LLM-вызов + I/O | `truncationStrategy as? LayeredMemory...` |
+| `refreshLongTermMemory` | ❌ нет — LLM-вызов + I/O | `truncationStrategy as? LayeredMemory...` |
 
 ---
 
 ## OCP: добавление новой стратегии
 
-До рефакторинга — `clearHistory()` требовал правки при каждой новой стратегии:
-
-```kotlin
-// ❌ Нарушение OCP — when по типам
-override suspend fun clearHistory() {
-    _context.clear()
-    when (strategy) {
-        is SummaryTruncationStrategy -> strategy.clearSummaries()
-        is StickyFactsStrategy       -> strategy.clearFacts()
-        is BranchingStrategy         -> strategy.clearBranches()
-        else -> Unit
-    }
-}
-```
-
-После рефакторинга — `clear()` входит в контракт стратегии:
+`clearHistory()` делегирует в `clear()` стратегии — новая стратегия просто переопределяет его:
 
 ```kotlin
 // ✅ OCP соблюдён — новая стратегия просто переопределяет clear()
@@ -141,6 +132,18 @@ override suspend fun clearHistory() {
     _context.clear()
     _truncationStrategy?.clear()
 }
+```
+
+### Особый случай: LayeredMemoryStrategy.clear()
+
+`LayeredMemoryStrategy.clear()` вызывает `memoryStorage.clearSession()` — это очищает
+только WORKING и compressed. **LONG_TERM намеренно не очищается** при сбросе сессии:
+
+```kotlin
+// MemoryStorage.clearSession():
+_working    = emptyList()   // ← очищается
+_compressed = emptyList()   // ← очищается
+// _longTerm               // ← намеренно не трогаем
 ```
 
 ---
@@ -154,31 +157,21 @@ override suspend fun clearHistory() {
 | `JsonSummaryStorage` | `Mutex` | suspend + IO |
 | `JsonFactsStorage` | `Mutex` | suspend + IO |
 | `JsonBranchStorage` | `Mutex` | suspend + IO |
+| `JsonMemoryStorage` | три `Mutex` (по одному на слой) | suspend + IO, слои независимы |
+| `InMemoryMemoryStorage` | `Mutex` | suspend + IO |
 | `SimpleLLMAgent._config` | `@Volatile` + `synchronized` в setter | Читается в suspend без блокировки |
 | `SimpleLLMAgent._truncationStrategy` | `@Volatile` + `synchronized` в setter | То же |
 
+### JsonMemoryStorage — почему три Mutex
+
 ```kotlin
-// ✅ @Volatile — безопасное чтение в suspend без блокировки потока
-@Volatile private var _config: AgentConfig = initialConfig
-
-// ✅ synchronized только в не-suspend методах
-override fun updateConfig(newConfig: AgentConfig) {
-    synchronized(this) { _config = newConfig }
-}
-
-// ✅ Snapshot — единое согласованное чтение _config
-override suspend fun send(message: String): Flow<AgentStreamEvent> {
-    val config = _config   // одно volatile-чтение
-    val request = AgentRequest(model = config.defaultModel, temperature = config.defaultTemperature, ...)
-    return chatStream(request)
-}
-
-// ❌ synchronized в suspend блокирует поток при приостановке корутины
-suspend fun bad() { synchronized(lock) { withContext(IO) { } } }
-
-// ✅ Mutex приостанавливает корутину, поток свободен
-suspend fun good() { mutex.withLock { withContext(IO) { } } }
+// Три независимых слоя — нет смысла блокировать весь storage при записи в один слой
+private val workingMutex    = Mutex()
+private val longTermMutex   = Mutex()
+private val compressedMutex = Mutex()
 ```
+
+Это позволяет одновременно читать LONG_TERM и записывать WORKING — без лишних блокировок.
 
 ---
 
@@ -186,9 +179,13 @@ suspend fun good() { mutex.withLock { withContext(IO) { } } }
 
 ```
 ✅ system prompt
-✅ getAdditionalSystemMessages() от стратегии  (summary / facts)
-✅ _context.getHistory()                        (активные сообщения)
+✅ getAdditionalSystemMessages() от стратегии:
+    Summary:        [system: summary text]
+    StickyFacts:    [system: "Key facts: ..."]
+    LayeredMemory:  [system: "Long-term memory: ..."] + [system: "Working memory: ..."]
+✅ _context.getHistory()                        (активные сообщения / SHORT_TERM)
 
 ❌ ConversationSummary.originalMessages         (только UI)
+❌ compressedMessages из Facts/Memory           (только UI)
 ❌ вся история при keepConversationHistory=false (только текущий userMessage)
 ```

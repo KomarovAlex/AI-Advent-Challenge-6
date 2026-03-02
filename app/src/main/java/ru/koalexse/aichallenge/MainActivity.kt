@@ -11,7 +11,9 @@ import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.CleaningServices
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Work
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -90,7 +92,7 @@ fun Content(state: State<ChatUiState>, handleIntent: (ChatIntent) -> Unit) {
                             }
                         }
 
-                        // ── Кнопка «Checkpoint» (только для Branching) ─────────────────────
+                        // ── Кнопки Branching ──────────────────────────────────────────────
                         if (uiState.activeStrategy == ContextStrategyType.BRANCHING) {
                             IconButton(
                                 onClick = { handleIntent(ChatIntent.CreateCheckpoint) },
@@ -104,7 +106,6 @@ fun Content(state: State<ChatUiState>, handleIntent: (ChatIntent) -> Unit) {
                                 )
                             }
 
-                            // ── Кнопка переключения веток ─────────────────────────────────
                             IconButton(
                                 onClick = { handleIntent(ChatIntent.OpenBranchDialog) },
                                 enabled = !uiState.isLoading && !uiState.isSwitchingBranch
@@ -112,6 +113,31 @@ fun Content(state: State<ChatUiState>, handleIntent: (ChatIntent) -> Unit) {
                                 Icon(
                                     imageVector = Icons.Default.AccountTree,
                                     contentDescription = stringResource(R.string.toolbar_branches)
+                                )
+                            }
+                        }
+
+                        // ── Кнопки Layered Memory ─────────────────────────────────────────
+                        if (uiState.activeStrategy == ContextStrategyType.LAYERED_MEMORY) {
+                            // 💼 Обновить рабочую память (WORKING)
+                            IconButton(
+                                onClick = { handleIntent(ChatIntent.RefreshWorkingMemory) },
+                                enabled = !uiState.isLoading && !uiState.isRefreshingWorkingMemory
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Work,
+                                    contentDescription = stringResource(R.string.toolbar_refresh_working_memory)
+                                )
+                            }
+
+                            // 🧠 Обновить долговременную память (LONG_TERM) — явный выбор пользователя
+                            IconButton(
+                                onClick = { handleIntent(ChatIntent.RefreshLongTermMemory) },
+                                enabled = !uiState.isLoading && !uiState.isRefreshingLongTermMemory
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Psychology,
+                                    contentDescription = stringResource(R.string.toolbar_refresh_long_term_memory)
                                 )
                             }
                         }

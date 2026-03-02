@@ -25,6 +25,11 @@
     <string name="toolbar_checkpoint">Create checkpoint</string>
     <string name="toolbar_branches">Switch branch</string>
 
+    <!-- Layered Memory toolbar -->
+    <string name="toolbar_refresh_working_memory">Update working memory 💼</string>
+    <string name="toolbar_refresh_long_term_memory">Update long-term memory 🧠</string>
+    <string name="toolbar_clear_all_memory">Clear all memory</string>
+
     <!-- Facts bubble -->
     <string name="facts_bubble_label">📌 Key facts</string>
 

@@ -169,7 +169,6 @@ private fun SessionStatsFooter(
                 color = MaterialTheme.colorScheme.outlineVariant
             )
 
-            // Индикатор активной ветки
             if (activeBranchName != null) {
                 Text(
                     text = stringResource(
@@ -225,22 +224,34 @@ private fun MessageList(
         reverseLayout = true
     ) {
         items(messageList, key = { it.id }) { message ->
-            // facts_bubble — специальный стиль с меткой 📌
-            if (message.id == "facts_bubble") {
-                FactsBubble(text = message.text)
-            } else if (message.isCompressed) {
-                CompressedMessageBubble(
-                    isUser = message.isUser,
-                    text = message.text
-                )
-            } else {
-                MessageBubble(
-                    isUser = message.isUser,
-                    text = message.text,
-                    isLoading = message.isLoading,
-                    tokenStats = message.tokenStats,
-                    responseDurationMs = message.responseDurationMs
-                )
+            when {
+                // Layered Memory bubbles — распознаём по id
+                message.id == "long_term_memory_bubble" ->
+                    LongTermMemoryBubble(text = message.text)
+
+                message.id == "working_memory_bubble" ->
+                    WorkingMemoryBubble(text = message.text)
+
+                // StickyFacts bubble
+                message.id == "facts_bubble" ->
+                    FactsBubble(text = message.text)
+
+                // Все остальные сжатые сообщения
+                message.isCompressed ->
+                    CompressedMessageBubble(
+                        isUser = message.isUser,
+                        text = message.text
+                    )
+
+                // Обычное сообщение
+                else ->
+                    MessageBubble(
+                        isUser = message.isUser,
+                        text = message.text,
+                        isLoading = message.isLoading,
+                        tokenStats = message.tokenStats,
+                        responseDurationMs = message.responseDurationMs
+                    )
             }
         }
     }
@@ -292,8 +303,82 @@ private fun ErrorDialog(error: String, onDismiss: () -> Unit) {
 }
 
 /**
+ * Бабл долговременной памяти 🧠 — профиль, решения, устойчивые знания.
+ * Фиолетовый фон (tertiaryContainer), самый верхний в ленте.
+ */
+@Composable
+private fun LongTermMemoryBubble(text: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            shape = RoundedCornerShape(8.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.tertiaryContainer
+            )
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Text(
+                    text = "🧠 Long-term memory",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = text,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Бабл рабочей памяти 💼 — текущая задача, шаги, промежуточные результаты.
+ * Синий фон (primaryContainer), под долговременной памятью.
+ */
+@Composable
+private fun WorkingMemoryBubble(text: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Start
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            shape = RoundedCornerShape(8.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer
+            )
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Text(
+                    text = "💼 Working memory",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = text,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+        }
+    }
+}
+
+/**
  * Специальный бабл для отображения текущих фактов (StickyFacts-стратегия).
- * Фиксируется в начале ленты, выглядит как системное сообщение.
+ * Фиксируется в начале ленты.
  */
 @Composable
 private fun FactsBubble(text: String) {
@@ -445,21 +530,22 @@ fun ChatScreenPreview() {
         mutableStateOf(
             ChatUiState(
                 messages = listOf(
-                    Message("facts_bubble", false, "• цель: написать приложение\n• язык: Kotlin", isCompressed = true),
-                    Message("c1", true, "Старое сообщение 1", isCompressed = true),
-                    Message("c2", false, "Старый ответ ассистента", isCompressed = true),
-                    Message("1", true, "Hello, how are you?"),
+                    Message("long_term_memory_bubble", false, "• имя: Алексей\n• язык: Kotlin\n• проект: aiChallenge", isCompressed = true),
+                    Message("working_memory_bubble", false, "• текущая задача: реализовать LayeredMemory\n• шаг 1 статус: done\n• шаг 2 статус: in-progress", isCompressed = true),
+                    Message("memory_c1", true, "Вытесненное сообщение 1", isCompressed = true),
+                    Message("memory_c2", false, "Вытесненный ответ ассистента", isCompressed = true),
+                    Message("1", true, "Как дела с задачей?"),
                     Message(
                         "2", false,
-                        "I'm doing great, thank you!",
-                        tokenStats = TokenStats(100, 50, 150, timeToFirstTokenMs = 350),
-                        responseDurationMs = 2500L
+                        "Шаг 2 в процессе!",
+                        tokenStats = TokenStats(150, 60, 210, timeToFirstTokenMs = 280),
+                        responseDurationMs = 1800L
                     )
                 ),
-                settingsData = SettingsData("deepseek-v3.2"),
-                sessionStats = SessionTokenStats(250, 120, 370, 1),
+                settingsData = SettingsData("deepseek-v3.2", strategy = ContextStrategyType.LAYERED_MEMORY),
+                sessionStats = SessionTokenStats(350, 150, 500, 2),
                 compressedMessageCount = 2,
-                activeStrategy = ContextStrategyType.STICKY_FACTS
+                activeStrategy = ContextStrategyType.LAYERED_MEMORY
             )
         )
     }) { }
