@@ -193,11 +193,50 @@ private suspend fun applyTruncation(config: AgentConfig)
 Порядок сообщений в запросе к LLM:
 
 ```
-1. [system]    systemPrompt из request или config.defaultSystemPrompt
-2. [system]    getAdditionalSystemMessages() от стратегии (summary / facts)
-3a. keepConversationHistory=true  → _context.getHistory() (уже содержит userMessage)
-3b. keepConversationHistory=false → только текущий userMessage
+1. [system]  systemPrompt из request (приоритет) или config.defaultSystemPrompt
+             + getAdditionalSystemMessages() от стратегии (summary / facts)
+             → все блоки объединяются в ОДНО system-сообщение через "\n\n"
+             → если все блоки пусты — system-сообщение не добавляется
+
+2a. keepConversationHistory=true  → _context.getHistory(), отфильтрованный от Role.SYSTEM
+                                    (уже содержит userMessage; SYSTEM исключается,
+                                     чтобы не дублировать инструкции из шага 1)
+2b. keepConversationHistory=false → только текущий userMessage
 ```
+
+Детали реализации `buildMessageList`:
+
+```kotlin
+// Шаг 1 — собираем все system-блоки в список строк
+val systemPrompts = mutableListOf<String>()
+
+val systemPrompt = request.systemPrompt ?: config.defaultSystemPrompt
+if (!systemPrompt.isNullOrBlank()) systemPrompts.add(systemPrompt)
+
+_truncationStrategy?.getAdditionalSystemMessages()
+    ?.map { it.content }
+    ?.filter { it.isNotBlank() }
+    ?.let { systemPrompts.addAll(it) }
+
+// Шаг 2 — одно объединённое system-сообщение (или ничего)
+if (systemPrompts.isNotEmpty()) {
+    messages.add(ApiMessage(role = "system", content = systemPrompts.joinToString("\n\n")))
+}
+
+// Шаг 3 — история или одиночный запрос
+if (config.keepConversationHistory) {
+    // SYSTEM-сообщения из истории исключаются — они уже учтены в шаге 2
+    _context.getHistory()
+        .filter { it.role != Role.SYSTEM }
+        .forEach { messages.add(it.toApiMessage()) }
+} else {
+    messages.add(ApiMessage(role = "user", content = request.userMessage))
+}
+```
+
+> ⚠️ В `_context` могут накапливаться `Role.SYSTEM` сообщения (например, если `addToHistory`
+> вызывается снаружи). В LLM-запрос они **не попадают** — фильтруются в шаге 3,
+> чтобы не дублировать system-инструкции, уже включённые в объединённый блок шага 2.
 
 ---
 
