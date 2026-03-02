@@ -346,20 +346,35 @@ class SimpleLLMAgent(
         config: AgentConfig
     ): List<ApiMessage> {
         val messages = mutableListOf<ApiMessage>()
+        val systemPrompts = mutableListOf<String>()
 
         // 1. Системный промпт: из запроса или из снимка конфига
         val systemPrompt = request.systemPrompt ?: config.defaultSystemPrompt
         if (!systemPrompt.isNullOrBlank()) {
-            messages.add(ApiMessage(role = "system", content = systemPrompt))
+            systemPrompts.add(systemPrompt)
         }
 
         // 2. Дополнительные системные сообщения от стратегии (summary, facts и т.п.)
         _truncationStrategy?.getAdditionalSystemMessages()
-            ?.forEach { msg -> messages.add(msg.toApiMessage()) }
+            ?.map { it.content }
+            ?.filter { it.isNotBlank() }
+            ?.let { systemPrompts.addAll(it) }
 
-        // 3. История или одиночный запрос
+        // 3. Добавляем объединенный system-промпт, если есть что добавлять
+        if (systemPrompts.isNotEmpty()) {
+            // Просто соединяем с двойным переносом строки
+            // Заголовки уже есть внутри каждого блока
+            val combinedSystemPrompt = systemPrompts.joinToString("\n\n")
+            messages.add(ApiMessage(role = "system", content = combinedSystemPrompt))
+        }
+
+        // 4. История или одиночный запрос
         if (config.keepConversationHistory) {
-            _context.getHistory().forEach { msg -> messages.add(msg.toApiMessage()) }
+            // Исключаем старые system-сообщения из истории,
+            // чтобы избежать дублирования инструкций
+            _context.getHistory()
+                .filter { it.role != Role.SYSTEM }
+                .forEach { msg -> messages.add(msg.toApiMessage()) }
         } else {
             messages.add(ApiMessage(role = "user", content = request.userMessage))
         }

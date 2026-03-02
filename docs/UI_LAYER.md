@@ -6,7 +6,9 @@
 class AgentChatViewModel(
     private val agent: Agent,
     private val availableModels: List<String>,
-    private val chatHistoryRepository: ChatHistoryRepository? = null
+    private val chatHistoryRepository: ChatHistoryRepository? = null,
+    initialStrategy: ContextStrategyType = ContextStrategyType.SUMMARY,
+    private val strategyFactory: ((ContextStrategyType) -> ContextTruncationStrategy?)? = null
 ) : ViewModel()
 ```
 
@@ -14,14 +16,19 @@ class AgentChatViewModel(
 
 ```kotlin
 // buildUiState() — декларативно, детали скрыты в AgentMessageUiMapper
-val compressedMessages = internal.summaries.toCompressedUiMessages()
-val historyMessages    = agent.conversationHistory.toActiveUiMessages(
-    lastMessageStats   = internal.lastMessageStats,
-    lastMessageDuration = internal.lastMessageDuration
-)
-val streamingMessages  = listOfNotNull(internal.streamingMessage?.toUiMessage())
+val longTermMessages    = internal.longTermMemory.toLongTermMemoryUiMessage()   // 🧠 bubble
+val workingMessages     = internal.workingMemory.toWorkingMemoryUiMessage()     // 💼 bubble
+val memCompressed       = internal.memoryCompressedMessages.toMemoryCompressedUiMessages()
+val compressedMessages  = internal.summaries.toCompressedUiMessages()
+val factsMessages       = buildFactsMessage(internal.facts)                     // 📌 bubble
+val factsCompressed     = internal.factsCompressedMessages.toFactsCompressedUiMessages()
+val historyMessages     = agent.conversationHistory.toActiveUiMessages(...)
+val streamingMessages   = listOfNotNull(internal.streamingMessage?.toUiMessage())
 
-allMessages = compressedMessages + historyMessages + streamingMessages
+// Порядок сверху вниз (список перевёрнут в LazyColumn с reverseLayout=true):
+allMessages = longTermMessages + workingMessages + memCompressed +
+              factsMessages + factsCompressed + compressedMessages +
+              historyMessages + streamingMessages
 ```
 
 ### MVI Intents
@@ -34,12 +41,40 @@ sealed class ChatIntent {
     data object ClearSession
     data object OpenSettings
     data class SaveSettings(val settingsData: SettingsData)
+    // StickyFacts
+    data object RefreshFacts
+    // Branching
+    data object CreateCheckpoint
+    data object OpenBranchDialog
+    data class SwitchBranch(val branchId: String)
+    // Layered Memory
+    data object RefreshWorkingMemory   // кнопка 💼 в тулбаре
+    data object RefreshLongTermMemory  // кнопка 🧠 в тулбаре
+    data object ClearAllMemory         // полная очистка памяти (включая LONG_TERM)
 }
 ```
 
 Добавить новый intent:
 1. Добавить case в `sealed class ChatIntent`
 2. Обработать в `handleIntent()` в ViewModel
+
+### Capability accessors
+
+```kotlin
+private val summaryStrategy: SummaryTruncationStrategy?
+    get() = agent.truncationStrategy as? SummaryTruncationStrategy
+
+private val factsStrategy: StickyFactsStrategy?
+    get() = agent.truncationStrategy as? StickyFactsStrategy
+
+private val branchingStrategy: BranchingStrategy?
+    get() = agent.truncationStrategy as? BranchingStrategy
+
+private val layeredMemoryStrategy: LayeredMemoryStrategy?
+    get() = agent.truncationStrategy as? LayeredMemoryStrategy
+```
+
+---
 
 ## AgentMessageUiMapper
 
@@ -50,23 +85,31 @@ Extension-функции для конвертации агентных моде
 
 ```kotlin
 // Одно сообщение → UI
-fun AgentMessage.toUiMessage(
-    id: String,
-    tokenStats: TokenStats? = null,
-    responseDurationMs: Long? = null,
-    isCompressed: Boolean = false
-): Message
+fun AgentMessage.toUiMessage(id, tokenStats?, responseDurationMs?, isCompressed): Message
 
 // Summaries → сжатые UI-сообщения (isCompressed=true)
 fun List<ConversationSummary>.toCompressedUiMessages(): List<Message>
 
+// Compressed от StickyFacts → UI (isCompressed=true)
+fun List<AgentMessage>.toFactsCompressedUiMessages(): List<Message>
+
+// Compressed от LayeredMemory → UI (isCompressed=true)
+fun List<AgentMessage>.toMemoryCompressedUiMessages(): List<Message>
+
+// WORKING memory entries → специальный UI-Message для WorkingMemoryBubble
+// Возвращает null если список пуст
+fun List<MemoryEntry>.toWorkingMemoryUiMessage(): Message?
+
+// LONG_TERM memory entries → специальный UI-Message для LongTermMemoryBubble
+// Возвращает null если список пуст
+fun List<MemoryEntry>.toLongTermMemoryUiMessage(): Message?
+
 // Активная история → UI-сообщения
 // Последнему ответу ассистента проставляются stats и duration
-fun List<AgentMessage>.toActiveUiMessages(
-    lastMessageStats: TokenStats? = null,
-    lastMessageDuration: Long? = null
-): List<Message>
+fun List<AgentMessage>.toActiveUiMessages(lastMessageStats?, lastMessageDuration?): List<Message>
 ```
+
+---
 
 ## ChatUiState
 
@@ -80,9 +123,55 @@ data class ChatUiState(
     val isSettingsOpen: Boolean,
     val error: String?,
     val sessionStats: SessionTokenStats?,
-    val compressedMessageCount: Int
+    val compressedMessageCount: Int,
+    val activeStrategy: ContextStrategyType,
+
+    // StickyFacts
+    val facts: List<Fact>,
+    val isRefreshingFacts: Boolean,
+
+    // Branching
+    val branches: List<DialogBranch>,
+    val activeBranchId: String?,
+    val isBranchLimitReached: Boolean,
+    val isSwitchingBranch: Boolean,
+    val isBranchDialogOpen: Boolean,
+
+    // Layered Memory
+    val workingMemory: List<MemoryEntry>,           // текущая рабочая память
+    val longTermMemory: List<MemoryEntry>,           // текущая долговременная память
+    val memoryCompressedMessages: List<AgentMessage>, // вытесненные сообщения (только UI)
+    val isRefreshingWorkingMemory: Boolean,
+    val isRefreshingLongTermMemory: Boolean
 )
 ```
+
+---
+
+## ContextStrategyType
+
+```kotlin
+enum class ContextStrategyType {
+    SLIDING_WINDOW,   // Скользящее окно, нет компрессии
+    STICKY_FACTS,     // Key-value факты + скользящее окно
+    BRANCHING,        // Ветки диалога
+    SUMMARY,          // LLM-суммаризация
+    LAYERED_MEMORY    // Трёхслойная модель памяти: SHORT_TERM + WORKING + LONG_TERM
+}
+```
+
+Отображаемые имена (в диалоге настроек):
+```kotlin
+fun ContextStrategyType.displayName(): String = when (this) {
+    SLIDING_WINDOW -> "Sliding Window"
+    STICKY_FACTS   -> "Sticky Facts"
+    BRANCHING      -> "Branching"
+    SUMMARY        -> "Summary (LLM)"
+    LAYERED_MEMORY -> "Layered Memory 🧠"
+}
+```
+
+---
 
 ## SettingsData
 
@@ -90,7 +179,8 @@ data class ChatUiState(
 data class SettingsData(
     val model: String,
     val temperature: String?,
-    val tokens: String?
+    val tokens: String?,
+    val strategy: ContextStrategyType = ContextStrategyType.SUMMARY
 )
 ```
 
@@ -98,6 +188,8 @@ data class SettingsData(
 1. Добавить в `SettingsData`
 2. Добавить в `AgentConfig`
 3. Обновить `Dialog.kt`
+
+---
 
 ## Composable-компоненты
 
@@ -111,22 +203,68 @@ fun MessageBubble(isUser, text, isLoading, tokenStats, responseDurationMs)
 ```kotlin
 @Composable
 fun CompressedMessageBubble(isUser, text)
-// alpha=0.5f, курсив, метка "🗜️ сжато", RoundedCornerShape(8.dp)
+// alpha=0.5f, курсив, метка "🗜️ сжато"
 ```
 
-Выбор в `MessageList`:
+### FactsBubble — факты StickyFacts
 ```kotlin
-if (message.isCompressed) CompressedMessageBubble(...) else MessageBubble(...)
+@Composable
+fun FactsBubble(text)
+// id = "facts_bubble", tertiaryContainer, метка "📌 Key facts"
 ```
+
+### WorkingMemoryBubble — рабочая память 💼
+```kotlin
+@Composable
+fun WorkingMemoryBubble(text)
+// id = "working_memory_bubble", primaryContainer, метка "💼 Working memory"
+```
+
+### LongTermMemoryBubble — долговременная память 🧠
+```kotlin
+@Composable
+fun LongTermMemoryBubble(text)
+// id = "long_term_memory_bubble", tertiaryContainer, метка "🧠 Long-term memory"
+```
+
+Диспетчеризация в `MessageList`:
+```kotlin
+when {
+    message.id == "long_term_memory_bubble" -> LongTermMemoryBubble(...)
+    message.id == "working_memory_bubble"   -> WorkingMemoryBubble(...)
+    message.id == "facts_bubble"            -> FactsBubble(...)
+    message.isCompressed                    -> CompressedMessageBubble(...)
+    else                                    -> MessageBubble(...)
+}
+```
+
+---
+
+## Тулбар: кнопки по стратегиям
+
+| Стратегия | Кнопки |
+|-----------|--------|
+| `STICKY_FACTS` | ✨ `AutoAwesome` — Refresh Facts |
+| `BRANCHING` | 🔖 `Bookmark` — Create Checkpoint, 🌿 `AccountTree` — Switch Branch |
+| `LAYERED_MEMORY` | 💼 `Work` — Refresh Working Memory, 🧠 `Psychology` — Refresh Long-Term Memory |
+| все | ⚙️ `Settings`, 🧹 `CleaningServices` — Clear Session |
+
+---
 
 ## Persistence в ViewModel
 
 **Загрузка** (`loadSavedHistory`):
 1. `chatHistoryRepository.loadActiveSession()`
-2. `agent.loadSummaries(savedSummaries)`
+2. `summaryStrategy?.loadSummaries(savedSummaries)`
 3. `agent.addToHistory(message)` для каждого сообщения
+4. `factsStrategy?.getFacts()` — через capability
+5. `layeredMemoryStrategy?.getWorkingMemory()` — через capability
+6. `layeredMemoryStrategy?.getLongTermMemory()` — через capability (persist между сессиями)
+7. `layeredMemoryStrategy?.getCompressedMessages()` — через capability
 
 **Сохранение** (`saveHistory`):
 1. `agent.conversationHistory` → `toSession()`
-2. `agent.getSummaries()` → включается в сессию
+2. `summaryStrategy?.getSummaries()` → включается в сессию
 3. `chatHistoryRepository.saveSession(session)`
+
+> MemoryStorage сохраняет данные сам при каждом `replace*` — отдельного шага не нужно.
