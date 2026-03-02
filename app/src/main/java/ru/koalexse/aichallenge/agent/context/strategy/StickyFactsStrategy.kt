@@ -18,9 +18,13 @@ import ru.koalexse.aichallenge.domain.StatsStreamResult
  * 1. Последние [keepRecentCount] сообщений остаются в LLM-контексте «как есть».
  * 2. Сообщения, вышедшие за пределы [keepRecentCount], **вытесняются из LLM-контекста**
  *    и сохраняются в [factsStorage] как compressed-сообщения — только для UI.
- * 3. В LLM-запрос уходят: факты (как system-сообщение через [getAdditionalSystemMessages])
+ * 3. Если вытесняемых сообщений накопилось ≥ [autoRefreshThreshold], факты обновляются
+ *    **автоматически** LLM-вызовом прямо внутри [truncate] (по аналогии с тем, как
+ *    [SummaryTruncationStrategy] создаёт summary при `oldMessages.size >= summaryBlockSize`).
+ *    Ошибка LLM при авторефреше проглатывается — основной поток не ломается.
+ * 4. В LLM-запрос уходят: факты (как system-сообщение через [getAdditionalSystemMessages])
  *    + последние N сообщений. Вытесненные сообщения в LLM не включаются.
- * 4. Факты обновляются по явному запросу пользователя через [refreshFacts].
+ * 5. Факты можно обновить принудительно через [refreshFacts] (кнопка в UI).
  *
  * ### Отображение в UI
  * ```
@@ -35,6 +39,12 @@ import ru.koalexse.aichallenge.domain.StatsStreamResult
  * [M11 … M20]                                         ← из _context (recent only)
  * ```
  *
+ * ### Автосбор фактов vs. ручной refresh
+ * - **Автосбор** срабатывает в [truncate] когда вытесняемый блок ≥ [autoRefreshThreshold].
+ *   LLM получает вытесняемые сообщения + существующие факты → мёрджит → сохраняет.
+ * - **Ручной refresh** ([refreshFacts]) принимает текущую active-историю и делает то же самое.
+ *   Используется для принудительного обновления по кнопке в UI.
+ *
  * ### Capability-интерфейсы
  * Для управления фактами из ViewModel используйте приведение типа:
  * ```kotlin
@@ -42,22 +52,28 @@ import ru.koalexse.aichallenge.domain.StatsStreamResult
  * (agent.truncationStrategy as? StickyFactsStrategy)?.getCompressedMessages()
  * ```
  *
- * @param api             API для LLM-вызова при обновлении фактов
- * @param factsStorage    хранилище фактов и compressed-сообщений (persisted)
- * @param keepRecentCount количество последних сообщений, остающихся в LLM-контексте
- * @param factsModel      модель, используемая для обновления фактов
- * @param tokenEstimator  функция оценки токенов
+ * @param api                  API для LLM-вызова при обновлении фактов
+ * @param factsStorage         хранилище фактов и compressed-сообщений (persisted)
+ * @param keepRecentCount      количество последних сообщений, остающихся в LLM-контексте
+ * @param factsModel           модель, используемая для обновления фактов
+ * @param tokenEstimator       функция оценки токенов
+ * @param autoRefreshThreshold минимальное количество вытесняемых сообщений, при котором
+ *                             запускается автосбор фактов (аналог `summaryBlockSize`).
+ *                             По умолчанию [DEFAULT_AUTO_REFRESH_THRESHOLD] = 2
+ *                             (один полный обмен user + assistant).
  */
 class StickyFactsStrategy(
     private val api: StatsLLMApi,
     private val factsStorage: FactsStorage,
     val keepRecentCount: Int = DEFAULT_KEEP_RECENT,
     private val factsModel: String,
-    private val tokenEstimator: TokenEstimator = TokenEstimators.default
+    private val tokenEstimator: TokenEstimator = TokenEstimators.default,
+    val autoRefreshThreshold: Int = DEFAULT_AUTO_REFRESH_THRESHOLD
 ) : ContextTruncationStrategy {
 
     init {
         require(keepRecentCount > 0) { "keepRecentCount must be positive" }
+        require(autoRefreshThreshold > 0) { "autoRefreshThreshold must be positive" }
     }
 
     // ==================== ContextTruncationStrategy ====================
@@ -67,8 +83,13 @@ class StickyFactsStrategy(
      *
      * Сообщения за пределами [keepRecentCount] **не удаляются навсегда** — они
      * накапливаются в [factsStorage] как compressed-сообщения и доступны UI
-     * через [getCompressedMessages]. В возвращаемый список (который идёт в `_context`
-     * агента и затем в LLM-запрос) попадают только последние [keepRecentCount] сообщений.
+     * через [getCompressedMessages].
+     *
+     * Если вытесняемый блок содержит ≥ [autoRefreshThreshold] сообщений,
+     * запускается LLM-вызов для автоматического обновления фактов.
+     * Ошибка при авторефреше проглатывается — сжатие всё равно происходит.
+     *
+     * В возвращаемый список попадают только последние [keepRecentCount] сообщений.
      */
     override suspend fun truncate(
         messages: List<AgentMessage>,
@@ -81,9 +102,18 @@ class StickyFactsStrategy(
         val oldMessages = messages.dropLast(keepRecentCount)
 
         if (oldMessages.isNotEmpty()) {
-            // Добавляем вытесненные сообщения к уже накопленным compressed
+            // Сохраняем вытесненные сообщения для UI
             val alreadyCompressed = factsStorage.getCompressedMessages()
             factsStorage.setCompressedMessages(alreadyCompressed + oldMessages)
+
+            // Автосбор фактов по порогу — аналог summaryBlockSize в SummaryTruncationStrategy.
+            // Передаём вытесняемые сообщения + существующие факты (уже в factsStorage).
+            // При ошибке LLM — молча продолжаем, основной поток не ломаем.
+            if (oldMessages.size >= autoRefreshThreshold) {
+                try {
+                    refreshFacts(oldMessages)
+                } catch (_: Exception) { /* авторефреш фоновый, ошибка не критична */ }
+            }
 
             // В _context и LLM уходят только recent сообщения
             var result = recentMessages
@@ -154,15 +184,20 @@ class StickyFactsStrategy(
     // ==================== Facts refresh ====================
 
     /**
-     * Запускает LLM-вызов для обновления фактов на основе переданной истории.
+     * Запускает LLM-вызов для обновления фактов на основе переданных сообщений.
      *
-     * Принимает только **recent** сообщения (те, что сейчас находятся в `_context` агента).
-     * Вытесненные сообщения в LLM на этом этапе не передаются — они уже были учтены
-     * при предыдущих вызовах [refreshFacts] и отражены в существующих фактах.
+     * Используется в двух сценариях:
+     * - **Автосбор** (внутри [truncate]): `history` = вытесняемые `oldMessages`.
+     * - **Ручной refresh** (кнопка в UI): `history` = текущая active-история
+     *   из `agent.conversationHistory` (только recent).
+     *
+     * В обоих случаях LLM получает:
+     * - существующие факты из [factsStorage] (мёрдж, не перезапись)
+     * - переданные сообщения как «Recent conversation»
      *
      * Возвращает обновлённый список фактов (уже сохранённый в [factsStorage]).
      *
-     * @param history текущая активная (recent) история диалога из `agent.conversationHistory`
+     * @param history сообщения, на основе которых обновляются факты
      */
     suspend fun refreshFacts(history: List<AgentMessage>): List<Fact> =
         withContext(Dispatchers.IO) {
@@ -238,6 +273,13 @@ class StickyFactsStrategy(
 
     companion object {
         const val DEFAULT_KEEP_RECENT = 10
+
+        /**
+         * Минимальный размер вытесняемого блока для запуска автосбора фактов.
+         * = 2 соответствует одному полному обмену (user + assistant).
+         * Аналог [SummaryTruncationStrategy.DEFAULT_SUMMARY_BLOCK_SIZE].
+         */
+        const val DEFAULT_AUTO_REFRESH_THRESHOLD = 2
 
         private const val FACTS_EXTRACTION_PROMPT =
             """You are a fact extractor. Your task is to maintain a key-value list of important facts from the conversation.

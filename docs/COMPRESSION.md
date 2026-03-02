@@ -72,11 +72,12 @@ class SlidingWindowStrategy(
 ## Стратегия 2 — Sticky Facts
 
 ```
-История: [M1…M20], keepRecentCount=10
+История: [M1…M20], keepRecentCount=10, autoRefreshThreshold=2
 
 После truncate():
-  _context (→ LLM):  [M11…M20]           ← только recent
-  factsStorage:      compressed=[M1…M10]  ← вытесненные сообщения (только UI)
+  _context (→ LLM):  [M11…M20]                           ← только recent
+  factsStorage:      facts=[goal: X, language: Kotlin]   ← обновлены автоматически
+                     compressed=[M1…M10]                 ← вытесненные (только UI)
 
 В LLM-запросе:
   [system: "Key facts: goal: X, language: Kotlin"]   ← из getAdditionalSystemMessages()
@@ -88,82 +89,162 @@ UI:
   [M11…M20]                       ← recent messages
 ```
 
-> `compressedMessages` — только UI. В LLM уходят **только факты** (как system) + recent.
+> `compressedMessages` — только UI.
+> В LLM уходят **только факты** (как system-сообщение) + recent-сообщения.
+
+### Сигнатура класса
 
 ```kotlin
 class StickyFactsStrategy(
     private val api: StatsLLMApi,
     private val factsStorage: FactsStorage,
-    val keepRecentCount: Int = 10,
+    val keepRecentCount: Int = 10,          // размер «окна» recent в LLM-контексте
     private val factsModel: String,
-    private val tokenEstimator: TokenEstimator = TokenEstimators.default
+    private val tokenEstimator: TokenEstimator = TokenEstimators.default,
+    val autoRefreshThreshold: Int = 2       // аналог summaryBlockSize
 ) : ContextTruncationStrategy {
 
     // clear() → factsStorage.clear() (очищает и факты, и compressedMessages)
 
     // Доступ через capability (ViewModel):
     suspend fun getFacts(): List<Fact>
+    suspend fun clearFacts()
     suspend fun getCompressedMessages(): List<AgentMessage>   // ← для UI
     suspend fun loadCompressedMessages(messages: List<AgentMessage>)
     suspend fun refreshFacts(history: List<AgentMessage>): List<Fact>
-    suspend fun clearFacts()
 }
 ```
 
-### Как работает вытеснение сообщений
+### Как работает `truncate()`
 
-При каждом вызове `truncate()`, если история длиннее `keepRecentCount`:
+Вызывается агентом после каждого добавленного сообщения.
 
-1. `oldMessages = messages.dropLast(keepRecentCount)` — сообщения за пределами окна
-2. `factsStorage.setCompressedMessages(alreadyCompressed + oldMessages)` — накапливаются
-3. В `_context` агента возвращаются только `recentMessages` — именно они идут в LLM
-4. Вытесненные сообщения хранятся в `facts.json` и видны в UI с пометкой «сжатые»
+```
+messages = [M1…M20], keepRecentCount=10
 
-### refreshFacts — работает только на recent
+recentMessages = [M11…M20]
+oldMessages    = [M1…M10]   ← вытесняемый блок
 
-`refreshFacts(history)` принимает `agent.conversationHistory` — это уже только recent-сообщения
-(вытесненные не входят). Вытесненные сообщения были учтены при предыдущих вызовах
-`refreshFacts` и отражены в существующих фактах.
+1. factsStorage.setCompressedMessages(already + oldMessages)
+   → накапливаем для UI
 
-### Использование из ViewModel (capability pattern)
+2. if (oldMessages.size >= autoRefreshThreshold):      ← 10 >= 2 → true
+       refreshFacts(oldMessages)                       ← LLM-вызов
+       └── existingFacts + oldMessages → LLM → merge → factsStorage.replaceFacts()
+       // при ошибке LLM — молча продолжаем
+
+3. return recentMessages   → в _context агента и затем в LLM
+```
+
+> **Аналогия с Summary:** `autoRefreshThreshold` играет ту же роль, что `summaryBlockSize`
+> в `SummaryTruncationStrategy` — оба определяют минимальный размер вытесняемого блока
+> для запуска фонового LLM-вызова.
+
+### `refreshFacts()` — два сценария использования
+
+Один и тот же метод, разные входные данные:
+
+| Сценарий | Вызывающий | `history` | Когда |
+|----------|-----------|-----------|-------|
+| **Автосбор** | `truncate()` внутри стратегии | `oldMessages` (вытесняемый блок) | автоматически, при `size >= autoRefreshThreshold` |
+| **Ручной refresh** | `ViewModel.refreshFacts()` | `agent.conversationHistory` (только recent) | по кнопке ✨ в UI |
+
+В обоих случаях LLM получает **существующие факты** + **переданные сообщения**,
+и делает мёрдж — результат сохраняется в `factsStorage`.
+
+```
+LLM-запрос при refreshFacts:
+  [system: FACTS_EXTRACTION_PROMPT]
+  [user:   "Existing facts:\n- goal: X\n\nRecent conversation:\nUser: ...\nAssistant: ..."]
+```
+
+### Ошибка LLM при автосборе
+
+Если автосбор (`refreshFacts` внутри `truncate`) бросил исключение — оно **проглатывается**.
+Вытеснение сообщений в `compressedMessages` при этом уже произошло.
+Факты остаются прежними. Основной поток (ответ агента) не ломается.
+
+Ручной refresh (кнопка) — ошибка отображается в UI через поле `error` в `ChatUiState`.
+
+### Синхронизация UI после каждого ответа
+
+После `AgentStreamEvent.Completed` ViewModel читает оба поля из стратегии —
+авторефреш мог обновить факты прямо внутри `truncate()`:
 
 ```kotlin
-// В AgentChatViewModel:
+// AgentChatViewModel.handleAgentStream → Completed:
+val newFacts           = factsStrategy?.getFacts()              ?: emptyList()
+val newFactsCompressed = factsStrategy?.getCompressedMessages() ?: emptyList()
+_internalState.update { state ->
+    state.copy(facts = newFacts, factsCompressedMessages = newFactsCompressed, ...)
+}
+```
+
+### Capability pattern в ViewModel
+
+```kotlin
 private val factsStrategy: StickyFactsStrategy?
     get() = agent.truncationStrategy as? StickyFactsStrategy
 
-// Загрузка при старте (JsonFactsStorage восстановит из facts.json):
-val savedFacts = factsStrategy?.getFacts() ?: emptyList()
+// Загрузка при старте — JsonFactsStorage восстанавливает из facts.json:
+val savedFacts      = factsStrategy?.getFacts()              ?: emptyList()
 val savedCompressed = factsStrategy?.getCompressedMessages() ?: emptyList()
 
-// Обновление по кнопке (только recent-сообщения):
+// Ручной refresh по кнопке:
 val updated = factsStrategy?.refreshFacts(agent.conversationHistory) ?: emptyList()
 
-// Синхронизация compressed после каждого ответа:
+// После каждого ответа (Completed) — синхронизация:
+val newFacts      = factsStrategy?.getFacts()              ?: emptyList()
 val newCompressed = factsStrategy?.getCompressedMessages() ?: emptyList()
 ```
 
-### Fact
+### `autoRefreshThreshold` — настройка в `AppModule`
 
 ```kotlin
-data class Fact(val key: String, val value: String, val updatedAt: Long)
+// AppModule.buildStrategy():
+ContextStrategyType.STICKY_FACTS -> StickyFactsStrategy(
+    api = statsLLMApi,
+    factsStorage = JsonFactsStorage(context),
+    factsModel = defaultModel,
+    // autoRefreshThreshold = 2  (по умолчанию) — один обмен user+assistant
+    // Увеличьте (напр. до 4–6), чтобы реже делать LLM-вызовы (экономия токенов)
+)
 ```
 
-### FactsStorage
+### Модели данных
+
+```kotlin
+data class Fact(
+    val key: String,
+    val value: String,
+    val updatedAt: Long = System.currentTimeMillis()
+)
+```
 
 ```kotlin
 interface FactsStorage {
+    // Факты
     suspend fun getFacts(): List<Fact>
     suspend fun replaceFacts(facts: List<Fact>)
-    suspend fun clear()                                          // очищает всё
+    suspend fun clear()                                    // очищает факты И compressed
 
-    // Compressed messages — вытесненные из LLM-контекста (только UI)
+    // Compressed messages — вытесненные из LLM-контекста, только для UI
     suspend fun getCompressedMessages(): List<AgentMessage>
     suspend fun setCompressedMessages(messages: List<AgentMessage>)
 }
-// InMemoryFactsStorage — для тестов
-// JsonFactsStorage (data/persistence/) — персистенция, facts.json (v2: facts + compressedMessages)
+
+// Реализации:
+// InMemoryFactsStorage          — для тестов, данные в памяти
+// JsonFactsStorage              — персистенция в facts.json (schema v2):
+//   { "version": 2, "facts": [...], "compressedMessages": [...] }
 ```
+
+### Константы
+
+| Константа | Значение | Смысл |
+|-----------|----------|-------|
+| `DEFAULT_KEEP_RECENT` | `10` | размер recent-окна по умолчанию |
+| `DEFAULT_AUTO_REFRESH_THRESHOLD` | `2` | один user+assistant обмен |
 
 ---
 
@@ -319,6 +400,20 @@ summaryStrategy?.loadSummaries(savedSummaries)
 // Чтение для persistence:
 val summaries = summaryStrategy?.getSummaries() ?: emptyList()
 ```
+
+---
+
+## Сравнение Summary и Sticky Facts
+
+| | `SummaryTruncationStrategy` | `StickyFactsStrategy` |
+|---|---|---|
+| Что уходит в LLM вместо старых сообщений | текст summary (свободная форма) | key-value факты (структурированно) |
+| Триггер фонового LLM-вызова | `oldMessages.size >= summaryBlockSize` | `oldMessages.size >= autoRefreshThreshold` |
+| Параметр порога | `summaryBlockSize = 10` | `autoRefreshThreshold = 2` |
+| Накопление старых блоков | каждый блок → отдельный `ConversationSummary` | всё в одном flat-списке `compressedMessages` |
+| UI для старых сообщений | `originalMessages` внутри каждого summary | `factsCompressedMessages` — единый список |
+| Ручное обновление | нет | `refreshFacts()` по кнопке ✨ |
+| Persistence | `summaries.json` | `facts.json` (v2: facts + compressedMessages) |
 
 ---
 
