@@ -55,4 +55,6 @@
     <string name="profile_delete_confirm">Delete</string>
     <string name="profile_selected_label">selected</string>
     <string name="profile_no_facts">No facts extracted yet</string>
+    <string name="profile_extract_facts">Extract facts from text</string>
+    <string name="profile_extracting_facts">Extracting…</string>
 </resources>

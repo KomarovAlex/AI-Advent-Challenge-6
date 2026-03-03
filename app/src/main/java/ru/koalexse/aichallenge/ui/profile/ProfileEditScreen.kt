@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -22,6 +24,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -87,7 +90,7 @@ fun ProfileEditScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            if (state.isLoading) {
+            if (state.isLoading && !state.isExtracting) {
                 CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
             } else {
                 Column(
@@ -121,6 +124,26 @@ fun ProfileEditScreen(
                         maxLines = 12,
                         modifier = Modifier.fillMaxWidth()
                     )
+
+                    // ── Кнопка «Извлечь факты» ────────────────────────────────
+                    OutlinedButton(
+                        onClick = { viewModel.handleIntent(ProfileEditIntent.ExtractFacts) },
+                        enabled = state.profile.rawText.isNotBlank()
+                                && !state.isExtracting
+                                && !state.isLoading,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (state.isExtracting) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(stringResource(R.string.profile_extracting_facts))
+                        } else {
+                            Text(stringResource(R.string.profile_extract_facts))
+                        }
+                    }
 
                     // ── Извлечённые факты ─────────────────────────────────────
                     Column {
@@ -169,11 +192,21 @@ fun ProfileEditScreen(
                     Spacer(Modifier.height(8.dp))
 
                     // ── Кнопка Сохранить ──────────────────────────────────────
+                    // При наличии rawText перед сохранением автоматически запускается
+                    // извлечение фактов внутри ViewModel.save().
                     Button(
                         onClick = { viewModel.handleIntent(ProfileEditIntent.Save) },
-                        enabled = !state.isLoading,
+                        enabled = !state.isLoading && !state.isExtracting,
                         modifier = Modifier.fillMaxWidth()
                     ) {
+                        if (state.isExtracting || state.isLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
                         Text(stringResource(R.string.profile_save))
                     }
                 }

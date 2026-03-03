@@ -147,8 +147,19 @@ class AppModule(
     fun createProfileListViewModel(): ProfileListViewModel =
         ProfileListViewModel(profileStorage)
 
-    fun createProfileEditViewModel(): ProfileEditViewModel =
-        ProfileEditViewModel(profileStorage)
+    fun createProfileEditViewModel(): ProfileEditViewModel {
+        val factsProvider = LLMSummaryProvider(
+            api = statsLLMApi,
+            model = defaultModel,
+            summaryPrompt = FACTS_EXTRACTION_PROMPT,
+            maxSummaryTokens = 300L,
+            temperature = 0.2f
+        )
+        return ProfileEditViewModel(
+            storage = profileStorage,
+            summaryProvider = factsProvider
+        )
+    }
 
     // ==================== Прочее ====================
 
@@ -179,6 +190,18 @@ class AppModule(
         var stopSequences: List<String>? = null
         var keepHistory: Boolean = true
         var maxHistorySize: Int? = null
+    }
+
+    companion object {
+        private const val FACTS_EXTRACTION_PROMPT = """You are a personal profile analyzer. Extract key facts about the user from the text below.
+
+Requirements:
+- Output ONLY a bullet list of facts, one per line, starting with "-"
+- Each fact must be a short, self-contained statement (max 10 words)
+- Focus on: name, age, profession, location, interests, goals, preferences, constraints
+- Skip vague or unimportant details
+- Write in the same language as the input text
+- Do NOT add any introduction or conclusion — only the list"""
     }
 }
 
