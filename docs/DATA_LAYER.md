@@ -70,6 +70,84 @@ interface ChatHistoryRepository {
 
 ---
 
+## Профили пользователя
+
+**Пакет:** `data/persistence/profile/`
+
+### Profile — доменная модель
+
+```kotlin
+data class Profile(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "",
+    val rawText: String = "",       // свободный текст — источник для извлечения фактов
+    val facts: List<String> = emptyList(), // извлечённые факты для системного промпта
+    val isDefault: Boolean = false  // default-профиль нельзя удалить и переименовать
+) {
+    companion object {
+        const val DEFAULT_PROFILE_ID = "default"
+        fun createDefault(): Profile  // Profile(id="default", name="Default", ...)
+    }
+}
+```
+
+### JsonProfileStorage — CRUD + выбор активного профиля
+
+```kotlin
+class JsonProfileStorage(context: Context, fileName: String = "profiles.json") {
+    suspend fun getAll(): List<Profile>
+    suspend fun getById(id: String): Profile?
+    suspend fun getSelectedId(): String
+    suspend fun setSelectedId(id: String)
+    suspend fun save(profile: Profile)      // insert или update; для default защищает isDefault/name
+    suspend fun delete(id: String): Boolean // default удалить нельзя → false
+}
+```
+
+- Хранит данные в `profiles.json` (файлы приложения).
+- При первом обращении **автоматически создаёт default-профиль** (`id = "default"`).
+- Потокобезопасно через `Mutex`; кэширует список в памяти.
+- При удалении выбранного профиля автоматически переключается на `default`.
+
+### Структура profiles.json
+
+```json
+{
+  "version": 1,
+  "selectedProfileId": "default",
+  "profiles": [
+    {
+      "id": "default",
+      "name": "Default",
+      "rawText": "",
+      "facts": [],
+      "isDefault": true
+    },
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "name": "Алексей",
+      "rawText": "Я разработчик из Москвы, интересуюсь AI.",
+      "facts": ["разработчик", "Москва", "интересуется AI"],
+      "isDefault": false
+    }
+  ]
+}
+```
+
+### DI (AppModule)
+
+```kotlin
+val profileStorage: JsonProfileStorage by lazy { JsonProfileStorage(context) }
+
+fun createProfileListViewModel(): ProfileListViewModel = ProfileListViewModel(profileStorage)
+fun createProfileEditViewModel(): ProfileEditViewModel = ProfileEditViewModel(profileStorage)
+```
+
+Единственный экземпляр `JsonProfileStorage` — shared между `ProfileListViewModel` и
+`ProfileEditViewModel`. Создаётся через `lazy` в `AppModule`.
+
+---
+
 ## JsonMemoryStorage — персистенция LayeredMemory
 
 Три **отдельных** файла, каждый со своим `Mutex`.
@@ -141,6 +219,7 @@ private val compressedMutex = Mutex()
 | `memory_working.json` | Рабочая память (LayeredMemory) |
 | `memory_long_term.json` | Долговременная память (LayeredMemory, persist навсегда) |
 | `memory_compressed.json` | Вытесненные сообщения для UI (LayeredMemory) |
+| `profiles.json` | Список профилей + id выбранного профиля |
 
 ---
 

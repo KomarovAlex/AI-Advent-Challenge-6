@@ -24,6 +24,7 @@
     <string name="toolbar_refresh_facts">Refresh facts</string>
     <string name="toolbar_checkpoint">Create checkpoint</string>
     <string name="toolbar_branches">Switch branch</string>
+    <string name="toolbar_profiles">Profiles</string>
 
     <!-- Layered Memory toolbar -->
     <string name="toolbar_refresh_working_memory">Update working memory 💼</string>
@@ -39,4 +40,18 @@
 
     <!-- Branch stats -->
     <string name="branch_stats_format">🌿 Branch: %1$s | Total branches: %2$d</string>
+
+    <!-- Profile screens -->
+    <string name="profile_list_title">Profiles</string>
+    <string name="profile_edit_title">Edit profile</string>
+    <string name="profile_new_title">New profile</string>
+    <string name="profile_name_label">Name</string>
+    <string name="profile_raw_text_label">About you (free text)</string>
+    <string name="profile_facts_label">Extracted facts</string>
+    <string name="profile_save">Save</string>
+    <string name="profile_delete_confirm_title">Delete profile?</string>
+    <string name="profile_delete_confirm_message">Profile \"%1$s\" will be deleted permanently.</string>
+    <string name="profile_delete_confirm">Delete</string>
+    <string name="profile_selected_label">selected</string>
+    <string name="profile_no_facts">No facts extracted yet</string>
 </resources>

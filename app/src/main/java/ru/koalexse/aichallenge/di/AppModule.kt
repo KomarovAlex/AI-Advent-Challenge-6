@@ -26,18 +26,12 @@ import ru.koalexse.aichallenge.data.persistence.JsonBranchStorage
 import ru.koalexse.aichallenge.data.persistence.JsonChatHistoryRepository
 import ru.koalexse.aichallenge.data.persistence.JsonFactsStorage
 import ru.koalexse.aichallenge.data.persistence.JsonMemoryStorage
+import ru.koalexse.aichallenge.data.persistence.profile.JsonProfileStorage
 import ru.koalexse.aichallenge.ui.AgentChatViewModel
+import ru.koalexse.aichallenge.ui.profile.ProfileEditViewModel
+import ru.koalexse.aichallenge.ui.profile.ProfileListViewModel
 import ru.koalexse.aichallenge.ui.state.ContextStrategyType
 
-/**
- * Простой модуль зависимостей без использования DI-фреймворков.
- *
- * Граф зависимостей:
- *   UI → Agent → domain
- *   UI → data  → domain
- *   data реализует agent.StatsLLMApi  ✅
- *   ViewModel не знает о SummaryStorage / FactsStorage / BranchStorage / MemoryStorage — только об Agent ✅
- */
 class AppModule(
     private val context: Context,
     private val apiKey: String,
@@ -48,7 +42,6 @@ class AppModule(
 
     val llmApi: LLMApi by lazy { OpenAIApi(apiKey, baseUrl) }
 
-    /** Реализует [StatsLLMApi] из agent/ — инверсия зависимости. */
     val statsLLMApi: StatsLLMApi by lazy { StatsTrackingLLMApi(llmApi) }
 
     val agentConfig: AgentConfig by lazy {
@@ -59,7 +52,6 @@ class AppModule(
             defaultSystemPrompt = null,
             defaultStopSequences = listOf("===КОНЕЦ===", "-end-"),
             keepConversationHistory = true,
-            // maxContextTokens намеренно не задан — управляет стратегия
         )
     }
 
@@ -67,15 +59,13 @@ class AppModule(
         JsonChatHistoryRepository(context)
     }
 
+    /** Единственный экземпляр хранилища профилей — shared между List и Edit VM. */
+    val profileStorage: JsonProfileStorage by lazy {
+        JsonProfileStorage(context)
+    }
+
     // ==================== Фабрика стратегий ====================
 
-    /**
-     * Создаёт экземпляр стратегии по типу.
-     *
-     * Вызывается ViewModel при смене стратегии через настройки.
-     * Каждый вызов создаёт **новый** экземпляр со свежими storage-объектами,
-     * чтобы не смешивать данные разных стратегий.
-     */
     fun buildStrategy(type: ContextStrategyType): ContextTruncationStrategy? = when (type) {
         ContextStrategyType.SLIDING_WINDOW -> SlidingWindowStrategy()
 
@@ -83,7 +73,6 @@ class AppModule(
             api = statsLLMApi,
             factsStorage = JsonFactsStorage(context),
             factsModel = defaultModel,
-            // autoRefreshThreshold = 2 (по умолчанию) — один полный обмен user+assistant.
         )
 
         ContextStrategyType.BRANCHING -> BranchingStrategy(
@@ -99,22 +88,11 @@ class AppModule(
             api = statsLLMApi,
             memoryStorage = JsonMemoryStorage(context),
             memoryModel = defaultModel,
-            // keepRecentCount = 10 (по умолчанию) — размер SHORT_TERM окна
-            // autoRefreshThreshold = 2 (по умолчанию) — триггер авторефреша WORKING
         )
     }
 
     // ==================== Фабричные методы ViewModel ====================
 
-    /**
-     * Основной метод создания ViewModel.
-     * Стратегия задаётся через [initialStrategyType] и может меняться
-     * пользователем прямо в настройках — агент пересоздаётся не нужен,
-     * достаточно вызова [Agent.updateTruncationStrategy].
-     *
-     * [strategyFactory] передаётся во ViewModel, чтобы та могла создавать
-     * новые стратегии при смене без зависимости на Android-контекст напрямую.
-     */
     fun createAgentChatViewModel(
         initialStrategyType: ContextStrategyType = ContextStrategyType.SUMMARY
     ): AgentChatViewModel {
@@ -134,9 +112,6 @@ class AppModule(
         )
     }
 
-    /**
-     * Создаёт ViewModel с Summary-стратегией (обратная совместимость с MainActivity).
-     */
     fun createAgentChatViewModelWithCompression(
         keepRecentCount: Int = 10,
         summaryBlockSize: Int = 10,
@@ -169,6 +144,12 @@ class AppModule(
         )
     }
 
+    fun createProfileListViewModel(): ProfileListViewModel =
+        ProfileListViewModel(profileStorage)
+
+    fun createProfileEditViewModel(): ProfileEditViewModel =
+        ProfileEditViewModel(profileStorage)
+
     // ==================== Прочее ====================
 
     fun createAgentWithBuilder(block: AgentBuilderScope.() -> Unit): Agent {
@@ -186,7 +167,6 @@ class AppModule(
         }
     }
 
-    /** Создаёт агента без фабричного метода ViewModel — для builder DSL. */
     val agent: Agent by lazy {
         AgentFactory.createAgentWithStats(statsLLMApi, agentConfig)
     }

@@ -268,3 +268,76 @@ when {
 3. `chatHistoryRepository.saveSession(session)`
 
 > MemoryStorage сохраняет данные сам при каждом `replace*` — отдельного шага не нужно.
+
+---
+
+## Профили пользователя (ui/profile/)
+
+### Экраны
+
+#### ProfileListScreen
+Список всех профилей. Показывает активный профиль (выделен `primaryContainer` + иконка ✅).
+- **FAB** → создаёт новый `Profile()` и открывает `ProfileEditScreen` с его `id`
+- Клик по карточке → `SelectProfile` + `onBack()`
+- Кнопка «Edit» → `onNavigateToEdit(profile.id)`
+- Кнопка удаления (только для не-default) → `RequestDelete` → диалог подтверждения
+
+#### ProfileEditScreen
+Редактор профиля. Поля: **name** (`OutlinedTextField`, отключено для default) и **rawText**.
+Факты (`facts`) — read-only, отображаются как `AssistChip` во `FlowRow`.
+- Загрузка: `LaunchedEffect(profileId)` → `ProfileEditIntent.Load`
+- Сохранение: кнопка «Сохранить» → `ProfileEditIntent.Save` → после `isSaved == true` навигация назад
+
+### MVI
+
+#### ProfileListIntent / ProfileListState
+
+```kotlin
+sealed class ProfileListIntent {
+    data object Load
+    data class SelectProfile(val profileId: String)
+    data class RequestDelete(val profileId: String)
+    data object ConfirmDelete
+    data object CancelDelete
+    data class NavigateToEdit(val profileId: String)  // handled by screen
+    data object CreateNew                              // handled by screen
+}
+
+data class ProfileListState(
+    val profiles: List<Profile> = emptyList(),
+    val selectedProfileId: String = Profile.DEFAULT_PROFILE_ID,
+    val isLoading: Boolean = false,
+    val error: String? = null,
+    val pendingDeleteId: String? = null   // id профиля, ожидающего подтверждения удаления
+)
+```
+
+#### ProfileEditIntent / ProfileEditState
+
+```kotlin
+sealed class ProfileEditIntent {
+    data class Load(val profileId: String)
+    data class UpdateName(val name: String)
+    data class UpdateRawText(val rawText: String)
+    data object Save
+    data object ClearError
+    data object ClearSaved
+}
+
+data class ProfileEditState(
+    val profile: Profile = Profile(),
+    val isLoading: Boolean = false,
+    val isSaved: Boolean = false,   // true → экран закрывается и возвращается назад
+    val error: String? = null
+)
+```
+
+### ViewModels
+
+```kotlin
+class ProfileListViewModel(storage: JsonProfileStorage) : ViewModel()
+class ProfileEditViewModel(storage: JsonProfileStorage) : ViewModel()
+```
+
+Оба получают один и тот же экземпляр `JsonProfileStorage` из `AppModule.profileStorage`.
+Создаются через `AppModule.createProfileListViewModel()` / `AppModule.createProfileEditViewModel()`.
