@@ -18,6 +18,8 @@ import ru.koalexse.aichallenge.agent.context.summary.JsonSummaryStorage
 import ru.koalexse.aichallenge.agent.context.summary.LLMSummaryProvider
 import ru.koalexse.aichallenge.agent.context.summary.SimpleSummaryProvider
 import ru.koalexse.aichallenge.agent.context.summary.SummaryProvider
+import ru.koalexse.aichallenge.agent.profile.ActiveProfileSystemPromptProvider
+import ru.koalexse.aichallenge.agent.profile.ProfileSystemPromptProvider
 import ru.koalexse.aichallenge.data.LLMApi
 import ru.koalexse.aichallenge.data.OpenAIApi
 import ru.koalexse.aichallenge.data.StatsTrackingLLMApi
@@ -26,18 +28,12 @@ import ru.koalexse.aichallenge.data.persistence.JsonBranchStorage
 import ru.koalexse.aichallenge.data.persistence.JsonChatHistoryRepository
 import ru.koalexse.aichallenge.data.persistence.JsonFactsStorage
 import ru.koalexse.aichallenge.data.persistence.JsonMemoryStorage
+import ru.koalexse.aichallenge.data.persistence.profile.JsonProfileStorage
 import ru.koalexse.aichallenge.ui.AgentChatViewModel
+import ru.koalexse.aichallenge.ui.profile.ProfileEditViewModel
+import ru.koalexse.aichallenge.ui.profile.ProfileListViewModel
 import ru.koalexse.aichallenge.ui.state.ContextStrategyType
 
-/**
- * Простой модуль зависимостей без использования DI-фреймворков.
- *
- * Граф зависимостей:
- *   UI → Agent → domain
- *   UI → data  → domain
- *   data реализует agent.StatsLLMApi  ✅
- *   ViewModel не знает о SummaryStorage / FactsStorage / BranchStorage / MemoryStorage — только об Agent ✅
- */
 class AppModule(
     private val context: Context,
     private val apiKey: String,
@@ -48,7 +44,6 @@ class AppModule(
 
     val llmApi: LLMApi by lazy { OpenAIApi(apiKey, baseUrl) }
 
-    /** Реализует [StatsLLMApi] из agent/ — инверсия зависимости. */
     val statsLLMApi: StatsLLMApi by lazy { StatsTrackingLLMApi(llmApi) }
 
     val agentConfig: AgentConfig by lazy {
@@ -59,7 +54,6 @@ class AppModule(
             defaultSystemPrompt = null,
             defaultStopSequences = listOf("===КОНЕЦ===", "-end-"),
             keepConversationHistory = true,
-            // maxContextTokens намеренно не задан — управляет стратегия
         )
     }
 
@@ -67,15 +61,32 @@ class AppModule(
         JsonChatHistoryRepository(context)
     }
 
-    // ==================== Фабрика стратегий ====================
+    /** Единственный экземпляр хранилища профилей — shared между List и Edit VM. */
+    val profileStorage: JsonProfileStorage by lazy {
+        JsonProfileStorage(context)
+    }
+
+    // ==================== Профиль ====================
 
     /**
-     * Создаёт экземпляр стратегии по типу.
+     * Провайдер блока профиля для system-промпта.
      *
-     * Вызывается ViewModel при смене стратегии через настройки.
-     * Каждый вызов создаёт **новый** экземпляр со свежими storage-объектами,
-     * чтобы не смешивать данные разных стратегий.
+     * Один экземпляр на всё приложение — при каждом запросе динамически читает
+     * активный профиль из [profileStorage]. Смена профиля пользователем отражается
+     * в следующем запросе без перезапуска агента.
+     *
+     * Агент (`SimpleLLMAgent`) получает только интерфейс [ProfileSystemPromptProvider]
+     * и не знает об Android-зависимостях внутри провайдера.
      */
+    val profilePromptProvider: ProfileSystemPromptProvider by lazy {
+        ActiveProfileSystemPromptProvider {
+            val selectedId = profileStorage.getSelectedId()
+            profileStorage.getById(selectedId)
+        }
+    }
+
+    // ==================== Фабрика стратегий ====================
+
     fun buildStrategy(type: ContextStrategyType): ContextTruncationStrategy? = when (type) {
         ContextStrategyType.SLIDING_WINDOW -> SlidingWindowStrategy()
 
@@ -83,7 +94,6 @@ class AppModule(
             api = statsLLMApi,
             factsStorage = JsonFactsStorage(context),
             factsModel = defaultModel,
-            // autoRefreshThreshold = 2 (по умолчанию) — один полный обмен user+assistant.
         )
 
         ContextStrategyType.BRANCHING -> BranchingStrategy(
@@ -99,22 +109,11 @@ class AppModule(
             api = statsLLMApi,
             memoryStorage = JsonMemoryStorage(context),
             memoryModel = defaultModel,
-            // keepRecentCount = 10 (по умолчанию) — размер SHORT_TERM окна
-            // autoRefreshThreshold = 2 (по умолчанию) — триггер авторефреша WORKING
         )
     }
 
     // ==================== Фабричные методы ViewModel ====================
 
-    /**
-     * Основной метод создания ViewModel.
-     * Стратегия задаётся через [initialStrategyType] и может меняться
-     * пользователем прямо в настройках — агент пересоздаётся не нужен,
-     * достаточно вызова [Agent.updateTruncationStrategy].
-     *
-     * [strategyFactory] передаётся во ViewModel, чтобы та могла создавать
-     * новые стратегии при смене без зависимости на Android-контекст напрямую.
-     */
     fun createAgentChatViewModel(
         initialStrategyType: ContextStrategyType = ContextStrategyType.SUMMARY
     ): AgentChatViewModel {
@@ -123,7 +122,8 @@ class AppModule(
             api = statsLLMApi,
             initialConfig = agentConfig,
             agentContext = SimpleAgentContext(),
-            truncationStrategy = initialStrategy
+            truncationStrategy = initialStrategy,
+            profilePromptProvider = profilePromptProvider
         )
         return AgentChatViewModel(
             agent = agent,
@@ -134,9 +134,6 @@ class AppModule(
         )
     }
 
-    /**
-     * Создаёт ViewModel с Summary-стратегией (обратная совместимость с MainActivity).
-     */
     fun createAgentChatViewModelWithCompression(
         keepRecentCount: Int = 10,
         summaryBlockSize: Int = 10,
@@ -158,7 +155,8 @@ class AppModule(
             api = statsLLMApi,
             initialConfig = agentConfig,
             agentContext = SimpleAgentContext(),
-            truncationStrategy = truncationStrategy
+            truncationStrategy = truncationStrategy,
+            profilePromptProvider = profilePromptProvider
         )
         return AgentChatViewModel(
             agent = agent,
@@ -166,6 +164,23 @@ class AppModule(
             chatHistoryRepository = chatHistoryRepository,
             initialStrategy = ContextStrategyType.SUMMARY,
             strategyFactory = ::buildStrategy
+        )
+    }
+
+    fun createProfileListViewModel(): ProfileListViewModel =
+        ProfileListViewModel(profileStorage)
+
+    fun createProfileEditViewModel(): ProfileEditViewModel {
+        val factsProvider = LLMSummaryProvider(
+            api = statsLLMApi,
+            model = defaultModel,
+            summaryPrompt = FACTS_EXTRACTION_PROMPT,
+            maxSummaryTokens = 300L,
+            temperature = 0.2f
+        )
+        return ProfileEditViewModel(
+            storage = profileStorage,
+            summaryProvider = factsProvider
         )
     }
 
@@ -186,7 +201,6 @@ class AppModule(
         }
     }
 
-    /** Создаёт агента без фабричного метода ViewModel — для builder DSL. */
     val agent: Agent by lazy {
         AgentFactory.createAgentWithStats(statsLLMApi, agentConfig)
     }
@@ -199,6 +213,18 @@ class AppModule(
         var stopSequences: List<String>? = null
         var keepHistory: Boolean = true
         var maxHistorySize: Int? = null
+    }
+
+    companion object {
+        private const val FACTS_EXTRACTION_PROMPT = """You are a personal profile analyzer. Extract key facts about the user from the text below.
+
+Requirements:
+- Output ONLY a bullet list of facts, one per line, starting with "-"
+- Each fact must be a short, self-contained statement (max 10 words)
+- Focus on: name, age, profession, location, interests, goals, preferences, constraints
+- Skip vague or unimportant details
+- Write in the same language as the input text
+- Do NOT add any introduction or conclusion — only the list"""
     }
 }
 

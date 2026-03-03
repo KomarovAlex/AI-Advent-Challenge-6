@@ -51,20 +51,30 @@ app/src/main/java/ru/koalexse/aichallenge/
 │       ├── JsonChatHistoryRepository.kt
 │       ├── JsonFactsStorage.kt     # Персистенция фактов → facts.json
 │       ├── JsonBranchStorage.kt    # Персистенция веток → branches.json
-│       └── JsonMemoryStorage.kt    # Персистенция памяти → memory_working.json,
-│                                   #   memory_long_term.json, memory_compressed.json
+│       ├── JsonMemoryStorage.kt    # Персистенция памяти → memory_working.json,
+│       │                           #   memory_long_term.json, memory_compressed.json
+│       └── profile/
+│           ├── ProfileModels.kt    # Profile (id, name, rawText, facts, isDefault)
+│           └── JsonProfileStorage.kt  # CRUD + выбор активного профиля → profiles.json
 ├── domain/
 │   └── Models.kt                   # Message, TokenStats, ChatRequest, ApiMessage
 ├── di/
 │   └── AppModule.kt                # AppModule, AppContainer (5 стратегий в buildStrategy)
+│                                   #   + createProfileListViewModel / createProfileEditViewModel
 └── ui/
     ├── AgentChatViewModel.kt       # ViewModel + ChatIntent (+ RefreshWorking/LongTerm Memory)
     ├── AgentMessageUiMapper.kt     # AgentMessage/ConversationSummary/MemoryEntry → Message
     ├── ChatScreen.kt               # MessageBubble, CompressedMessageBubble, FactsBubble,
     │                               #   WorkingMemoryBubble, LongTermMemoryBubble
     ├── Dialog.kt                   # MultiFieldInputDialog (+ стратегия), BranchSwitchDialog
-    └── state/
-        └── ChatUiState.kt          # ChatUiState, SettingsData, ContextStrategyType (+ LAYERED_MEMORY)
+    ├── state/
+    │   └── ChatUiState.kt          # ChatUiState, SettingsData, ContextStrategyType (+ LAYERED_MEMORY)
+    └── profile/
+        ├── ProfileModels.kt        # ProfileListState, ProfileEditState
+        ├── ProfileViewModel.kt     # ProfileListViewModel + ProfileListIntent (MVI)
+        ├── ProfileEditViewModel.kt # ProfileEditViewModel + ProfileEditIntent (MVI)
+        ├── ProfileListScreen.kt    # Список профилей, выбор активного, удаление
+        └── ProfileEditScreen.kt    # Редактор профиля: имя, rawText, просмотр фактов
 ```
 
 ## 📚 Документация
@@ -74,8 +84,8 @@ app/src/main/java/ru/koalexse/aichallenge/
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Схемы, поток данных, разделение ответственности |
 | [docs/AGENT.md](./docs/AGENT.md) | Agent, SimpleLLMAgent, AgentContext, buildMessageList |
 | [docs/COMPRESSION.md](./docs/COMPRESSION.md) | Стратегии (все 5), TruncationUtils, SummaryStorage, Facts, Branches, LayeredMemory |
-| [docs/DATA_LAYER.md](./docs/DATA_LAYER.md) | API, persistence, domain-модели |
-| [docs/UI_LAYER.md](./docs/UI_LAYER.md) | ViewModel, MVI, ChatUiState, AgentMessageUiMapper |
+| [docs/DATA_LAYER.md](./docs/DATA_LAYER.md) | API, persistence, domain-модели, профили |
+| [docs/UI_LAYER.md](./docs/UI_LAYER.md) | ViewModel, MVI, ChatUiState, AgentMessageUiMapper, профили |
 | [docs/RECIPES.md](./docs/RECIPES.md) | Быстрый старт, типичные задачи, тесты |
 
 ## 💾 Файлы данных на устройстве
@@ -89,3 +99,4 @@ app/src/main/java/ru/koalexse/aichallenge/
 | `memory_working.json` | Рабочая память — текущая задача, шаги, результаты (LayeredMemory) |
 | `memory_long_term.json` | Долговременная память — профиль, решения, знания (LayeredMemory) |
 | `memory_compressed.json` | Сообщения, вытесненные из LLM-контекста (только UI, LayeredMemory) |
+| `profiles.json` | Список профилей пользователя + id выбранного профиля |

@@ -70,6 +70,112 @@ interface ChatHistoryRepository {
 
 ---
 
+## Профили пользователя
+
+**Пакет:** `data/persistence/profile/`
+
+### Profile — доменная модель
+
+```kotlin
+data class Profile(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "",
+    val rawText: String = "",       // свободный текст — источник для извлечения фактов
+    val facts: List<String> = emptyList(), // извлечённые факты → используются в system-промпте
+    val isDefault: Boolean = false  // default-профиль нельзя удалить и переименовать
+) {
+    companion object {
+        const val DEFAULT_PROFILE_ID = "default"
+        fun createDefault(): Profile  // Profile(id="default", name="Default", ...)
+    }
+}
+```
+
+> `facts` — именно этот список попадает в system-промпт через `ProfileSystemPromptProvider`.
+> `rawText` используется только как источник для LLM-извлечения фактов в `ProfileEditViewModel`.
+
+### JsonProfileStorage — CRUD + выбор активного профиля
+
+```kotlin
+class JsonProfileStorage(context: Context, fileName: String = "profiles.json") {
+    suspend fun getAll(): List<Profile>
+    suspend fun getById(id: String): Profile?
+    suspend fun getSelectedId(): String
+    suspend fun setSelectedId(id: String)
+    suspend fun save(profile: Profile)      // insert или update; для default защищает isDefault/name
+    suspend fun delete(id: String): Boolean // default удалить нельзя → false
+}
+```
+
+- Хранит данные в `profiles.json` (файлы приложения).
+- При первом обращении **автоматически создаёт default-профиль** (`id = "default"`).
+- Потокобезопасно через `Mutex`; кэширует список в памяти.
+- При удалении выбранного профиля автоматически переключается на `default`.
+
+### Структура profiles.json
+
+```json
+{
+  "version": 1,
+  "selectedProfileId": "default",
+  "profiles": [
+    {
+      "id": "default",
+      "name": "Default",
+      "rawText": "",
+      "facts": [],
+      "isDefault": true
+    },
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "name": "Алексей",
+      "rawText": "Я разработчик из Москвы, интересуюсь AI.",
+      "facts": ["Имя: Алексей", "Локация: Москва", "Интересы: AI"],
+      "isDefault": false
+    }
+  ]
+}
+```
+
+### DI (AppModule)
+
+```kotlin
+/** Единственный экземпляр — shared между ProfileListViewModel, ProfileEditViewModel
+ *  и profilePromptProvider. Создаётся через lazy в AppModule. */
+val profileStorage: JsonProfileStorage by lazy { JsonProfileStorage(context) }
+
+/** Провайдер блока профиля для system-промпта агента.
+ *  Один экземпляр на приложение — при каждом запросе динамически читает активный профиль.
+ *  Смена профиля пользователем отражается в следующем запросе без перезапуска агента. */
+val profilePromptProvider: ProfileSystemPromptProvider by lazy {
+    ActiveProfileSystemPromptProvider {
+        val selectedId = profileStorage.getSelectedId()
+        profileStorage.getById(selectedId)
+    }
+}
+
+fun createProfileListViewModel(): ProfileListViewModel =
+    ProfileListViewModel(profileStorage)
+
+fun createProfileEditViewModel(): ProfileEditViewModel {
+    val factsProvider = LLMSummaryProvider(
+        api = statsLLMApi,
+        model = defaultModel,
+        summaryPrompt = FACTS_EXTRACTION_PROMPT,
+        maxSummaryTokens = 300L,
+        temperature = 0.2f
+    )
+    return ProfileEditViewModel(storage = profileStorage, summaryProvider = factsProvider)
+}
+```
+
+`profileStorage` shared между тремя потребителями:
+- `ProfileListViewModel` — список + выбор активного профиля
+- `ProfileEditViewModel` — редактирование + LLM-извлечение фактов
+- `profilePromptProvider` — чтение фактов активного профиля при каждом запросе к агенту
+
+---
+
 ## JsonMemoryStorage — персистенция LayeredMemory
 
 Три **отдельных** файла, каждый со своим `Mutex`.
@@ -141,6 +247,7 @@ private val compressedMutex = Mutex()
 | `memory_working.json` | Рабочая память (LayeredMemory) |
 | `memory_long_term.json` | Долговременная память (LayeredMemory, persist навсегда) |
 | `memory_compressed.json` | Вытесненные сообщения для UI (LayeredMemory) |
+| `profiles.json` | Список профилей + id выбранного профиля |
 
 ---
 
