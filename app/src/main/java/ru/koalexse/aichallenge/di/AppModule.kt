@@ -18,6 +18,8 @@ import ru.koalexse.aichallenge.agent.context.summary.JsonSummaryStorage
 import ru.koalexse.aichallenge.agent.context.summary.LLMSummaryProvider
 import ru.koalexse.aichallenge.agent.context.summary.SimpleSummaryProvider
 import ru.koalexse.aichallenge.agent.context.summary.SummaryProvider
+import ru.koalexse.aichallenge.agent.profile.ActiveProfileSystemPromptProvider
+import ru.koalexse.aichallenge.agent.profile.ProfileSystemPromptProvider
 import ru.koalexse.aichallenge.data.LLMApi
 import ru.koalexse.aichallenge.data.OpenAIApi
 import ru.koalexse.aichallenge.data.StatsTrackingLLMApi
@@ -64,6 +66,25 @@ class AppModule(
         JsonProfileStorage(context)
     }
 
+    // ==================== Профиль ====================
+
+    /**
+     * Провайдер блока профиля для system-промпта.
+     *
+     * Один экземпляр на всё приложение — при каждом запросе динамически читает
+     * активный профиль из [profileStorage]. Смена профиля пользователем отражается
+     * в следующем запросе без перезапуска агента.
+     *
+     * Агент (`SimpleLLMAgent`) получает только интерфейс [ProfileSystemPromptProvider]
+     * и не знает об Android-зависимостях внутри провайдера.
+     */
+    val profilePromptProvider: ProfileSystemPromptProvider by lazy {
+        ActiveProfileSystemPromptProvider {
+            val selectedId = profileStorage.getSelectedId()
+            profileStorage.getById(selectedId)
+        }
+    }
+
     // ==================== Фабрика стратегий ====================
 
     fun buildStrategy(type: ContextStrategyType): ContextTruncationStrategy? = when (type) {
@@ -101,7 +122,8 @@ class AppModule(
             api = statsLLMApi,
             initialConfig = agentConfig,
             agentContext = SimpleAgentContext(),
-            truncationStrategy = initialStrategy
+            truncationStrategy = initialStrategy,
+            profilePromptProvider = profilePromptProvider
         )
         return AgentChatViewModel(
             agent = agent,
@@ -133,7 +155,8 @@ class AppModule(
             api = statsLLMApi,
             initialConfig = agentConfig,
             agentContext = SimpleAgentContext(),
-            truncationStrategy = truncationStrategy
+            truncationStrategy = truncationStrategy,
+            profilePromptProvider = profilePromptProvider
         )
         return AgentChatViewModel(
             agent = agent,

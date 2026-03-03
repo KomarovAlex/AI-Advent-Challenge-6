@@ -336,8 +336,16 @@ data class ProfileEditState(
 
 ```kotlin
 class ProfileListViewModel(storage: JsonProfileStorage) : ViewModel()
-class ProfileEditViewModel(storage: JsonProfileStorage) : ViewModel()
+
+class ProfileEditViewModel(
+    storage: JsonProfileStorage,
+    summaryProvider: SummaryProvider   // LLMSummaryProvider с FACTS_EXTRACTION_PROMPT
+) : ViewModel()
 ```
 
 Оба получают один и тот же экземпляр `JsonProfileStorage` из `AppModule.profileStorage`.
 Создаются через `AppModule.createProfileListViewModel()` / `AppModule.createProfileEditViewModel()`.
+
+> `ProfileEditViewModel` принимает `summaryProvider` — использует `LLMSummaryProvider`
+> с `FACTS_EXTRACTION_PROMPT` для LLM-извлечения фактов из `rawText`.
+> Провайдер создаётся в `AppModule.createProfileEditViewModel()`.

@@ -81,7 +81,7 @@ data class Profile(
     val id: String = UUID.randomUUID().toString(),
     val name: String = "",
     val rawText: String = "",       // свободный текст — источник для извлечения фактов
-    val facts: List<String> = emptyList(), // извлечённые факты для системного промпта
+    val facts: List<String> = emptyList(), // извлечённые факты → используются в system-промпте
     val isDefault: Boolean = false  // default-профиль нельзя удалить и переименовать
 ) {
     companion object {
@@ -90,6 +90,9 @@ data class Profile(
     }
 }
 ```
+
+> `facts` — именно этот список попадает в system-промпт через `ProfileSystemPromptProvider`.
+> `rawText` используется только как источник для LLM-извлечения фактов в `ProfileEditViewModel`.
 
 ### JsonProfileStorage — CRUD + выбор активного профиля
 
@@ -127,7 +130,7 @@ class JsonProfileStorage(context: Context, fileName: String = "profiles.json") {
       "id": "550e8400-e29b-41d4-a716-446655440000",
       "name": "Алексей",
       "rawText": "Я разработчик из Москвы, интересуюсь AI.",
-      "facts": ["разработчик", "Москва", "интересуется AI"],
+      "facts": ["Имя: Алексей", "Локация: Москва", "Интересы: AI"],
       "isDefault": false
     }
   ]
@@ -137,14 +140,39 @@ class JsonProfileStorage(context: Context, fileName: String = "profiles.json") {
 ### DI (AppModule)
 
 ```kotlin
+/** Единственный экземпляр — shared между ProfileListViewModel, ProfileEditViewModel
+ *  и profilePromptProvider. Создаётся через lazy в AppModule. */
 val profileStorage: JsonProfileStorage by lazy { JsonProfileStorage(context) }
 
-fun createProfileListViewModel(): ProfileListViewModel = ProfileListViewModel(profileStorage)
-fun createProfileEditViewModel(): ProfileEditViewModel = ProfileEditViewModel(profileStorage)
+/** Провайдер блока профиля для system-промпта агента.
+ *  Один экземпляр на приложение — при каждом запросе динамически читает активный профиль.
+ *  Смена профиля пользователем отражается в следующем запросе без перезапуска агента. */
+val profilePromptProvider: ProfileSystemPromptProvider by lazy {
+    ActiveProfileSystemPromptProvider {
+        val selectedId = profileStorage.getSelectedId()
+        profileStorage.getById(selectedId)
+    }
+}
+
+fun createProfileListViewModel(): ProfileListViewModel =
+    ProfileListViewModel(profileStorage)
+
+fun createProfileEditViewModel(): ProfileEditViewModel {
+    val factsProvider = LLMSummaryProvider(
+        api = statsLLMApi,
+        model = defaultModel,
+        summaryPrompt = FACTS_EXTRACTION_PROMPT,
+        maxSummaryTokens = 300L,
+        temperature = 0.2f
+    )
+    return ProfileEditViewModel(storage = profileStorage, summaryProvider = factsProvider)
+}
 ```
 
-Единственный экземпляр `JsonProfileStorage` — shared между `ProfileListViewModel` и
-`ProfileEditViewModel`. Создаётся через `lazy` в `AppModule`.
+`profileStorage` shared между тремя потребителями:
+- `ProfileListViewModel` — список + выбор активного профиля
+- `ProfileEditViewModel` — редактирование + LLM-извлечение фактов
+- `profilePromptProvider` — чтение фактов активного профиля при каждом запросе к агенту
 
 ---
 

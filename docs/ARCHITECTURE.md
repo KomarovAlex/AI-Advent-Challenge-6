@@ -30,6 +30,16 @@ di/AppModule.kt              val statsLLMApi: StatsLLMApi = StatsTrackingLLMApi(
 
 Зависимость направлена внутрь: `data` → `agent` → `domain`. ✅
 
+Тот же принцип применён для профиля:
+
+```
+agent/profile/ProfileSystemPromptProvider.kt   interface ProfileSystemPromptProvider  ← здесь
+agent/profile/ActiveProfileSystemPromptProvider.kt  class ActiveProfileSystemPromptProvider ← здесь
+di/AppModule.kt  profilePromptProvider = ActiveProfileSystemPromptProvider { profileStorage... }
+```
+
+`agent/` видит только интерфейс — зависимости от `JsonProfileStorage` и Android нет. ✅
+
 ---
 
 ## Осознанный компромисс (ChatHistoryRepository)
@@ -48,7 +58,7 @@ ChatIntent
     → ViewModel.handleIntent()
     → agent.send(message)
     → SimpleLLMAgent.chatStream()
-        → buildMessageList()          [system] + [memory layers] + [history]
+        → buildMessageList()          [profile block] + [system] + [memory layers] + [history]
         → api.sendMessageStream()     OkHttp SSE
         → Flow<StatsStreamResult>
     → Flow<AgentStreamEvent>
@@ -64,6 +74,7 @@ ChatIntent
 | Компонент | Ответственность |
 |-----------|-----------------|
 | `AgentContext` | Приватное хранилище сообщений (`synchronized`) |
+| `ProfileSystemPromptProvider` | Формирование блока профиля для system-промпта (динамически при каждом запросе) |
 | `SummaryStorage` | Хранилище summaries (`Mutex` + IO) — деталь стратегии |
 | `FactsStorage` | Хранилище фактов — деталь стратегии |
 | `BranchStorage` | Хранилище веток — деталь стратегии |
@@ -159,8 +170,10 @@ _compressed = emptyList()   // ← очищается
 | `JsonBranchStorage` | `Mutex` | suspend + IO |
 | `JsonMemoryStorage` | три `Mutex` (по одному на слой) | suspend + IO, слои независимы |
 | `InMemoryMemoryStorage` | `Mutex` | suspend + IO |
+| `JsonProfileStorage` | `Mutex` | suspend + IO |
 | `SimpleLLMAgent._config` | `@Volatile` + `synchronized` в setter | Читается в suspend без блокировки |
 | `SimpleLLMAgent._truncationStrategy` | `@Volatile` + `synchronized` в setter | То же |
+| `SimpleLLMAgent.profilePromptProvider` | `val` — неизменяем | Безопасен без дополнительных механизмов |
 
 ### JsonMemoryStorage — почему три Mutex
 
@@ -178,7 +191,8 @@ private val compressedMutex = Mutex()
 ## Что уходит в LLM
 
 ```
-✅ system prompt
+✅ [system] ## User Profile (от ProfileSystemPromptProvider, если facts не пусты)
+✅ [system] defaultSystemPrompt / request.systemPrompt
 ✅ getAdditionalSystemMessages() от стратегии:
     Summary:        [system: summary text]
     StickyFacts:    [system: "Key facts: ..."]
@@ -188,4 +202,5 @@ private val compressedMutex = Mutex()
 ❌ ConversationSummary.originalMessages         (только UI)
 ❌ compressedMessages из Facts/Memory           (только UI)
 ❌ вся история при keepConversationHistory=false (только текущий userMessage)
+❌ Profile.rawText                              (только источник для извлечения фактов)
 ```
