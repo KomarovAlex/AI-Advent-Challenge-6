@@ -33,7 +33,8 @@ val strategy = LayeredMemoryStrategy(
     keepRecentCount = 10,
     autoRefreshThreshold = 2
 )
-val agent = SimpleLLMAgent(
+// AgentFactory возвращает ConfigurableAgent — нет unsafe-cast
+val agent: ConfigurableAgent = SimpleLLMAgent(
     api = statsLLMApi,
     initialConfig = agentConfig,
     agentContext = SimpleAgentContext(),
@@ -55,7 +56,7 @@ val profilePromptProvider = ActiveProfileSystemPromptProvider {
     profileStorage.getById(selectedId)
 }
 
-val agent = SimpleLLMAgent(
+val agent: ConfigurableAgent = SimpleLLMAgent(
     api = statsLLMApi,
     initialConfig = agentConfig,
     agentContext = SimpleAgentContext(),
@@ -69,6 +70,19 @@ val agent = SimpleLLMAgent(
 Через `AppModule` профиль подключается автоматически — ручная сборка нужна только
 вне `AppModule` (тесты, CLI-утилиты).
 
+### Агент через DSL (buildAgent)
+
+```kotlin
+// buildAgent возвращает ConfigurableAgent
+val agent: ConfigurableAgent = buildAgent {
+    withApi(statsLLMApi)
+    model("gpt-4")
+    temperature(0.7f)
+    systemPrompt("You are a helpful assistant.")
+    truncationStrategy(myStrategy)
+}
+```
+
 ### Отправка сообщения
 
 ```kotlin
@@ -78,6 +92,15 @@ agent.send("Привет!").collect { event ->
         is AgentStreamEvent.Completed   -> println("\nTokens: ${event.tokenStats}")
         is AgentStreamEvent.Error       -> println("Error: ${event.exception}")
     }
+}
+```
+
+### Read-only потребитель
+
+```kotlin
+// Тест или headless — зависит от Agent, не от ConfigurableAgent
+fun sendAndCollect(agent: Agent, message: String): Flow<AgentStreamEvent> {
+    return agent.send(message)  // нет доступа к updateConfig / updateTruncationStrategy
 }
 ```
 
@@ -104,6 +127,9 @@ agent.send("Привет!").collect { event ->
 4. Добавить создание в `AppModule.buildStrategy()`
 5. Добавить `displayName()` в `Dialog.kt`
 6. Добавить capability accessor в `AgentChatViewModel` при необходимости
+
+> Смена стратегии в рантайме идёт через `agent.updateTruncationStrategy(...)` —
+> это метод `ConfigurableAgent`, не базового `Agent`.
 
 ### Получить доступ к данным стратегии из ViewModel
 
@@ -234,7 +260,8 @@ fun `LONG_TERM: persists after clearSession`() = runTest {
     val strategy = LayeredMemoryStrategy(
         api = mockApi, memoryStorage = storage, memoryModel = "gpt-4"
     )
-    val agent = SimpleLLMAgent(api = mockApi, initialConfig = config, truncationStrategy = strategy)
+    // SimpleLLMAgent реализует ConfigurableAgent — используем как Agent в тесте
+    val agent: Agent = SimpleLLMAgent(api = mockApi, initialConfig = config, truncationStrategy = strategy)
     agent.addToHistory(AgentMessage(Role.USER, "Hello"))
 
     agent.clearHistory()  // → clearSession → LONG_TERM не трогается
@@ -330,5 +357,28 @@ fun `profile: facts present — block starts with header`() = runTest {
 fun `profile: null profile — getProfileBlock returns null`() = runTest {
     val provider = ActiveProfileSystemPromptProvider { null }
     assertNull(provider.getProfileBlock())
+}
+
+@Test
+fun `configurable: updateConfig changes model without restarting agent`() = runTest {
+    val agent: ConfigurableAgent = SimpleLLMAgent(
+        api = mockApi, initialConfig = config.copy(defaultModel = "gpt-3.5")
+    )
+    assertEquals("gpt-3.5", agent.config.defaultModel)
+
+    agent.updateConfig(agent.config.copy(defaultModel = "gpt-4"))
+
+    assertEquals("gpt-4", agent.config.defaultModel)
+}
+
+@Test
+fun `configurable: updateTruncationStrategy swaps strategy at runtime`() = runTest {
+    val agent: ConfigurableAgent = SimpleLLMAgent(api = mockApi, initialConfig = config)
+    assertNull(agent.truncationStrategy)
+
+    val strategy = SlidingWindowStrategy()
+    agent.updateTruncationStrategy(strategy)
+
+    assertSame(strategy, agent.truncationStrategy)
 }
 ```

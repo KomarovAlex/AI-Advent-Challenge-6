@@ -1,9 +1,9 @@
 package ru.koalexse.aichallenge.di
 
 import android.content.Context
-import ru.koalexse.aichallenge.agent.Agent
 import ru.koalexse.aichallenge.agent.AgentConfig
 import ru.koalexse.aichallenge.agent.AgentFactory
+import ru.koalexse.aichallenge.agent.ConfigurableAgent
 import ru.koalexse.aichallenge.agent.SimpleLLMAgent
 import ru.koalexse.aichallenge.agent.StatsLLMApi
 import ru.koalexse.aichallenge.agent.buildAgent
@@ -75,7 +75,7 @@ class AppModule(
      * активный профиль из [profileStorage]. Смена профиля пользователем отражается
      * в следующем запросе без перезапуска агента.
      *
-     * Агент (`SimpleLLMAgent`) получает только интерфейс [ProfileSystemPromptProvider]
+     * Агент ([SimpleLLMAgent]) получает только интерфейс [ProfileSystemPromptProvider]
      * и не знает об Android-зависимостях внутри провайдера.
      */
     val profilePromptProvider: ProfileSystemPromptProvider by lazy {
@@ -186,7 +186,7 @@ class AppModule(
 
     // ==================== Прочее ====================
 
-    fun createAgentWithBuilder(block: AgentBuilderScope.() -> Unit): Agent {
+    fun createAgentWithBuilder(block: AgentBuilderScope.() -> Unit): ConfigurableAgent {
         val scope = AgentBuilderScope()
         scope.block()
         return buildAgent {
@@ -201,7 +201,7 @@ class AppModule(
         }
     }
 
-    val agent: Agent by lazy {
+    val agent: ConfigurableAgent by lazy {
         AgentFactory.createAgentWithStats(statsLLMApi, agentConfig)
     }
 

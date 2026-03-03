@@ -2,6 +2,9 @@
 
 ## Интерфейс Agent
 
+Read-only контракт: не содержит мутирующих методов. Потребители без права на мутацию
+(тесты, headless-режим) работают с этим интерфейсом.
+
 ```kotlin
 interface Agent {
     val config: AgentConfig
@@ -21,12 +24,51 @@ interface Agent {
     suspend fun send(message: String): Flow<AgentStreamEvent>
     suspend fun clearHistory()               // очищает историю + делегирует clear() стратегии
     suspend fun addToHistory(message: AgentMessage)
+}
+```
+
+---
+
+## Интерфейс ConfigurableAgent
+
+Расширение `Agent` для агентов, поддерживающих смену конфига и стратегии в рантайме.
+Реализуется только `SimpleLLMAgent`.
+
+Разделение обосновано **ISP**: `updateConfig` и `updateTruncationStrategy` — мутирующие
+операции рантайма, нужные только `AgentChatViewModel`. Потребители без права на мутацию
+работают с базовым `Agent`.
+
+```kotlin
+interface ConfigurableAgent : Agent {
     fun updateConfig(newConfig: AgentConfig)
     fun updateTruncationStrategy(strategy: ContextTruncationStrategy?)
 }
 ```
 
-### Доступ к возможностям стратегий (Capability pattern)
+### Иерархия интерфейсов
+
+```
+Agent                         — read-only контракт
+  │  chat, chatStream, send
+  │  clearHistory, addToHistory
+  │  conversationHistory, config, truncationStrategy
+  │  initBranches, createCheckpoint, switchToBranch, ...
+  │
+  └─► ConfigurableAgent       — мутирующее расширение
+        │  updateConfig(newConfig)
+        │  updateTruncationStrategy(strategy?)
+        │
+        └─► SimpleLLMAgent    — единственная реализация
+
+Потребители:
+  AgentChatViewModel   → ConfigurableAgent  ✓ (нужна мутация)
+  Тесты / headless     → Agent              ✓ (мутация не нужна)
+  AgentFactory         → ConfigurableAgent  ✓ (возвращает конкретный тип)
+```
+
+---
+
+## Доступ к возможностям стратегий (Capability pattern)
 
 Summaries и Facts не входят в `Agent` — это нарушило бы ISP при каждом добавлении стратегии.
 ViewModel обращается к стратегии напрямую через приведение типа:
@@ -41,6 +83,9 @@ private val factsStrategy: StickyFactsStrategy?
 
 private val branchingStrategy: BranchingStrategy?
     get() = agent.truncationStrategy as? BranchingStrategy
+
+private val layeredMemoryStrategy: LayeredMemoryStrategy?
+    get() = agent.truncationStrategy as? LayeredMemoryStrategy
 
 // Использование:
 val summaries = summaryStrategy?.getSummaries() ?: emptyList()
@@ -163,11 +208,111 @@ class ActiveProfileSystemPromptProvider(
 ```
 
 **Правила:**
-- Вызывается при **каждом** запросе в `buildMessageList` — данные всегда актуальны
+- Вызывается при **каждом** запросе в `DefaultPromptBuilder.buildMessages` — данные всегда актуальны
 - `facts` пустой → `getProfileBlock()` возвращает `null` → блок не добавляется
 - Используется `Profile.facts` (не `rawText`)
 - Работает при **любой** стратегии (в т.ч. `null`)
 - Конкретный источник данных скрыт за lambda `getActiveProfile` — агент независим от Android
+
+---
+
+## PromptBuilder — формирование сообщений для LLM
+
+**Пакет:** `agent/`
+
+Отвечает за сборку полного списка сообщений для каждого LLM-запроса.
+Вынесен из `SimpleLLMAgent` для соблюдения SRP: агент управляет историей и жизненным
+циклом запроса, `PromptBuilder` — только формирует список сообщений.
+
+```kotlin
+// agent/PromptBuilder.kt
+interface PromptBuilder {
+    suspend fun buildMessages(
+        request: AgentRequest,
+        config: AgentConfig
+    ): List<ApiMessage>
+}
+```
+
+```kotlin
+// agent/DefaultPromptBuilder.kt
+class DefaultPromptBuilder(
+    private val profilePromptProvider: ProfileSystemPromptProvider? = null,
+    private val truncationStrategyProvider: () -> ContextTruncationStrategy? = { null },
+    private val historyProvider: () -> List<AgentMessage> = { emptyList() }
+) : PromptBuilder
+```
+
+Зависимости передаются лямбдами, чтобы всегда читать актуальные значения:
+`_truncationStrategy` может смениться через `ConfigurableAgent.updateTruncationStrategy`,
+история меняется при каждом сообщении.
+
+### Порядок сообщений в запросе к LLM
+
+```
+1. [system]  блоки объединяются в ОДНО system-сообщение через "\n\n":
+             1а. ## User Profile (от profilePromptProvider, если facts не пусты)
+             1б. systemPrompt из request (приоритет) или config.defaultSystemPrompt
+             1в. getAdditionalSystemMessages() от стратегии (summary / facts)
+             → если все блоки пусты — system-сообщение не добавляется
+
+2a. keepConversationHistory=true  → historyProvider(), отфильтрованный от Role.SYSTEM
+                                    (уже содержит userMessage; SYSTEM исключается,
+                                     чтобы не дублировать инструкции из шага 1)
+2b. keepConversationHistory=false → только текущий userMessage
+```
+
+Пример итогового system-промпта при заполненном профиле:
+
+```
+## User Profile
+- Имя: Алексей
+- Цель: учить Kotlin
+
+<defaultSystemPrompt>
+
+## Key facts        ← от StickyFactsStrategy / SummaryTruncationStrategy
+- факт 1
+```
+
+Детали реализации `DefaultPromptBuilder.buildMessages`:
+
+```kotlin
+val systemPrompts = mutableListOf<String>()
+
+// 1а. Блок профиля — первый, до системного промпта и стратегии
+profilePromptProvider?.getProfileBlock()
+    ?.let { systemPrompts.add(it) }
+
+// 1б. Системный промпт: из запроса или из снимка конфига
+val systemPrompt = request.systemPrompt ?: config.defaultSystemPrompt
+if (!systemPrompt.isNullOrBlank()) systemPrompts.add(systemPrompt)
+
+// 1в. Дополнительные системные сообщения от стратегии (summary, facts и т.п.)
+truncationStrategyProvider()?.getAdditionalSystemMessages()
+    ?.map { it.content }
+    ?.filter { it.isNotBlank() }
+    ?.let { systemPrompts.addAll(it) }
+
+// Одно объединённое system-сообщение (или ничего)
+if (systemPrompts.isNotEmpty()) {
+    messages.add(ApiMessage(role = "system", content = systemPrompts.joinToString("\n\n")))
+}
+
+// История или одиночный запрос
+if (config.keepConversationHistory) {
+    // SYSTEM-сообщения из истории исключаются — они уже учтены выше
+    historyProvider()
+        .filter { it.role != Role.SYSTEM }
+        .forEach { messages.add(it.toApiMessage()) }
+} else {
+    messages.add(ApiMessage(role = "user", content = request.userMessage))
+}
+```
+
+> ⚠️ В `_context` могут накапливаться `Role.SYSTEM` сообщения (например, если `addToHistory`
+> вызывается снаружи). В LLM-запрос они **не попадают** — фильтруются в шаге 2а,
+> чтобы не дублировать system-инструкции, уже включённые в объединённый блок шага 1.
 
 ---
 
@@ -179,12 +324,24 @@ class SimpleLLMAgent(
     initialConfig: AgentConfig,
     agentContext: AgentContext = SimpleAgentContext(),
     truncationStrategy: ContextTruncationStrategy? = null,
-    private val profilePromptProvider: ProfileSystemPromptProvider? = null  // ← персонализация
-) : Agent
+    private val profilePromptProvider: ProfileSystemPromptProvider? = null,
+    promptBuilder: PromptBuilder? = null  // null → создаётся DefaultPromptBuilder внутри
+) : ConfigurableAgent
 ```
 
-`profilePromptProvider = null` — дефолт сохраняет обратную совместимость: агент без профиля
-работает так же, как раньше.
+`promptBuilder = null` — дефолт сохраняет обратную совместимость: `DefaultPromptBuilder`
+создаётся в теле класса с лямбдами на `_truncationStrategy` и `_context`:
+
+```kotlin
+private val _promptBuilder: PromptBuilder = promptBuilder ?: DefaultPromptBuilder(
+    profilePromptProvider = profilePromptProvider,
+    truncationStrategyProvider = { _truncationStrategy },
+    historyProvider = { _context.getHistory() }
+)
+```
+
+Лямбды создаются **после** инициализации полей `_truncationStrategy` и `_context` —
+захватывают `this`, вызываются позже, всегда возвращают актуальные значения.
 
 ---
 
@@ -244,81 +401,10 @@ override suspend fun chatStream(request: AgentRequest): Flow<AgentStreamEvent> {
 
 ```kotlin
 private suspend fun buildChatRequest(request: AgentRequest, config: AgentConfig): ChatRequest
-private suspend fun buildMessageList(request: AgentRequest, config: AgentConfig): List<ApiMessage>
 private suspend fun addMessageWithTruncation(message: AgentMessage, config: AgentConfig)
 private suspend fun applyTruncation(config: AgentConfig)
+// buildMessages — в DefaultPromptBuilder, принимает (request, config) явно
 ```
-
----
-
-## SimpleLLMAgent — buildMessageList
-
-Порядок сообщений в запросе к LLM:
-
-```
-1. [system]  блоки объединяются в ОДНО system-сообщение через "\n\n":
-             1а. ## User Profile (от profilePromptProvider, если facts не пусты)
-             1б. systemPrompt из request (приоритет) или config.defaultSystemPrompt
-             1в. getAdditionalSystemMessages() от стратегии (summary / facts)
-             → если все блоки пусты — system-сообщение не добавляется
-
-2a. keepConversationHistory=true  → _context.getHistory(), отфильтрованный от Role.SYSTEM
-                                    (уже содержит userMessage; SYSTEM исключается,
-                                     чтобы не дублировать инструкции из шага 1)
-2b. keepConversationHistory=false → только текущий userMessage
-```
-
-Пример итогового system-промпта при заполненном профиле:
-
-```
-## User Profile
-- Имя: Алексей
-- Цель: учить Kotlin
-
-<defaultSystemPrompt>
-
-## Key facts        ← от StickyFactsStrategy / SummaryTruncationStrategy
-- факт 1
-```
-
-Детали реализации `buildMessageList`:
-
-```kotlin
-val systemPrompts = mutableListOf<String>()
-
-// 1а. Блок профиля — первый, до системного промпта и стратегии
-profilePromptProvider?.getProfileBlock()
-    ?.let { systemPrompts.add(it) }
-
-// 1б. Системный промпт: из запроса или из снимка конфига
-val systemPrompt = request.systemPrompt ?: config.defaultSystemPrompt
-if (!systemPrompt.isNullOrBlank()) systemPrompts.add(systemPrompt)
-
-// 1в. Дополнительные системные сообщения от стратегии (summary, facts и т.п.)
-_truncationStrategy?.getAdditionalSystemMessages()
-    ?.map { it.content }
-    ?.filter { it.isNotBlank() }
-    ?.let { systemPrompts.addAll(it) }
-
-// Одно объединённое system-сообщение (или ничего)
-if (systemPrompts.isNotEmpty()) {
-    messages.add(ApiMessage(role = "system", content = systemPrompts.joinToString("\n\n")))
-}
-
-// История или одиночный запрос
-if (config.keepConversationHistory) {
-    // SYSTEM-сообщения из истории исключаются — они уже учтены выше
-    _context.getHistory()
-        .filter { it.role != Role.SYSTEM }
-        .forEach { messages.add(it.toApiMessage()) }
-} else {
-    messages.add(ApiMessage(role = "user", content = request.userMessage))
-}
-```
-
-> ⚠️ В `_context` могут накапливаться `Role.SYSTEM` сообщения (например, если `addToHistory`
-> вызывается снаружи). В LLM-запрос они **не попадают** — фильтруются в шаге 3,
-> чтобы не дублировать system-инструкции, уже включённые в объединённый блок шага 2.
 
 ---
 
@@ -367,6 +453,7 @@ sealed class AgentException : Exception {
 | `_config` (использование) | `val config = _config` snapshot в начале метода | Согласованность параметров внутри одного вызова |
 | `_truncationStrategy` | то же, что `_config` | то же |
 | `_context` | `synchronized` внутри `SimpleAgentContext` | Потокобезопасные операции над списком |
+| `_promptBuilder` | `val` — неизменяем после инициализации | Безопасен без дополнительных механизмов |
 | `profilePromptProvider` | `val` — неизменяем после инициализации | Безопасен без дополнительных механизмов |
 | Flow стриминг | `.map` + `.catch` | Нет вложенного collect |
 
@@ -388,7 +475,6 @@ override suspend fun chat(request: AgentRequest): AgentResponse {
 
 // ✅ Snapshot передаётся в приватные методы явно
 private suspend fun buildChatRequest(request: AgentRequest, config: AgentConfig): ChatRequest
-private suspend fun buildMessageList(request: AgentRequest, config: AgentConfig): List<ApiMessage>
 
 // ❌ synchronized в suspend — блокирует поток при приостановке корутины
 suspend fun bad() { synchronized(lock) { withContext(IO) { } } }

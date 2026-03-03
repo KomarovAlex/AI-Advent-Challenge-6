@@ -8,11 +8,12 @@
 app/src/main/java/ru/koalexse/aichallenge/
 ├── MainActivity.kt
 ├── agent/
-│   ├── Agent.kt                    # Интерфейс агента (+ facts/branches API)
+│   ├── Agent.kt                    # Read-only интерфейс агента (history, chat, branches)
+│   ├── ConfigurableAgent.kt        # Мутирующее расширение Agent (updateConfig, updateTruncationStrategy)
 │   ├── AgentModels.kt              # AgentRequest, AgentConfig, AgentMessage, AgentStreamEvent
-│   ├── AgentFactory.kt             # AgentFactory, AgentBuilder, buildAgent {}
+│   ├── AgentFactory.kt             # AgentFactory, AgentBuilder, buildAgent {} → ConfigurableAgent
 │   ├── LLMApi.kt                   # interface StatsLLMApi (реализация в data/)
-│   ├── SimpleLLMAgent.kt           # Реализация агента
+│   ├── SimpleLLMAgent.kt           # Реализация ConfigurableAgent
 │   └── context/
 │       ├── AgentContext.kt         # Интерфейс хранилища (приватный для агента)
 │       ├── SimpleAgentContext.kt
@@ -62,7 +63,8 @@ app/src/main/java/ru/koalexse/aichallenge/
 │   └── AppModule.kt                # AppModule, AppContainer (5 стратегий в buildStrategy)
 │                                   #   + createProfileListViewModel / createProfileEditViewModel
 └── ui/
-    ├── AgentChatViewModel.kt       # ViewModel + ChatIntent (+ RefreshWorking/LongTerm Memory)
+    ├── AgentChatViewModel.kt       # ViewModel(ConfigurableAgent) + ChatIntent
+    │                               #   (+ RefreshWorking/LongTerm Memory)
     ├── AgentMessageUiMapper.kt     # AgentMessage/ConversationSummary/MemoryEntry → Message
     ├── ChatScreen.kt               # MessageBubble, CompressedMessageBubble, FactsBubble,
     │                               #   WorkingMemoryBubble, LongTermMemoryBubble
@@ -82,7 +84,7 @@ app/src/main/java/ru/koalexse/aichallenge/
 | Файл | Содержимое |
 |------|------------|
 | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) | Схемы, поток данных, разделение ответственности |
-| [docs/AGENT.md](./docs/AGENT.md) | Agent, SimpleLLMAgent, AgentContext, buildMessageList |
+| [docs/AGENT.md](./docs/AGENT.md) | Agent, ConfigurableAgent, SimpleLLMAgent, AgentContext, buildMessageList |
 | [docs/COMPRESSION.md](./docs/COMPRESSION.md) | Стратегии (все 5), TruncationUtils, SummaryStorage, Facts, Branches, LayeredMemory |
 | [docs/DATA_LAYER.md](./docs/DATA_LAYER.md) | API, persistence, domain-модели, профили |
 | [docs/UI_LAYER.md](./docs/UI_LAYER.md) | ViewModel, MVI, ChatUiState, AgentMessageUiMapper, профили |
@@ -100,3 +102,4 @@ app/src/main/java/ru/koalexse/aichallenge/
 | `memory_long_term.json` | Долговременная память — профиль, решения, знания (LayeredMemory) |
 | `memory_compressed.json` | Сообщения, вытесненные из LLM-контекста (только UI, LayeredMemory) |
 | `profiles.json` | Список профилей пользователя + id выбранного профиля |
+```

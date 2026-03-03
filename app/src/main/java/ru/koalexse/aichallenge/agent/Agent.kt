@@ -14,6 +14,9 @@ import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
  * Агент является чистой сущностью без зависимостей на Android фреймворк
  * и может использоваться в любом окружении (Android, CLI, тесты).
  *
+ * Мутирующие операции (смена конфига и стратегии) вынесены в [ConfigurableAgent].
+ * Потребители, которым они не нужны (тесты, headless-режим), работают с этим интерфейсом.
+ *
  * ### Доступ к возможностям стратегий
  * Стратегия-специфичные операции не входят в этот интерфейс (ISP).
  * Используйте приведение типа [truncationStrategy]:
@@ -119,12 +122,6 @@ interface Agent {
      * После добавления применяется стратегия обрезки, если она установлена.
      */
     suspend fun addToHistory(message: AgentMessage)
-
-    /** Обновляет конфигурацию агента */
-    fun updateConfig(newConfig: AgentConfig)
-
-    /** Обновляет стратегию обрезки контекста */
-    fun updateTruncationStrategy(strategy: ContextTruncationStrategy?)
 }
 
 /**

@@ -4,13 +4,17 @@
 
 ```kotlin
 class AgentChatViewModel(
-    private val agent: Agent,
+    private val agent: ConfigurableAgent,   // явно декларирует право на мутацию
     private val availableModels: List<String>,
     private val chatHistoryRepository: ChatHistoryRepository? = null,
     initialStrategy: ContextStrategyType = ContextStrategyType.SUMMARY,
     private val strategyFactory: ((ContextStrategyType) -> ContextTruncationStrategy?)? = null
 ) : ViewModel()
 ```
+
+`ConfigurableAgent` вместо `Agent` — явный контракт: ViewModel имеет право вызывать
+`updateConfig` и `updateTruncationStrategy`. Потребители без права на мутацию
+работают с базовым `Agent`.
 
 ### Сборка списка сообщений
 
@@ -72,6 +76,17 @@ private val branchingStrategy: BranchingStrategy?
 
 private val layeredMemoryStrategy: LayeredMemoryStrategy?
     get() = agent.truncationStrategy as? LayeredMemoryStrategy
+```
+
+### Смена стратегии в рантайме
+
+```kotlin
+// applyStrategyChange() — вызывается при смене ContextStrategyType в настройках
+private suspend fun applyStrategyChange(newStrategyType: ContextStrategyType) {
+    val factory = strategyFactory ?: return
+    agent.updateTruncationStrategy(factory(newStrategyType))  // ConfigurableAgent
+    // ... сброс UI-данных, инициализация данных новой стратегии
+}
 ```
 
 ---
@@ -138,7 +153,7 @@ data class ChatUiState(
     val isBranchDialogOpen: Boolean,
 
     // Layered Memory
-    val workingMemory: List<MemoryEntry>,           // текущая рабочая память
+    val workingMemory: List<MemoryEntry>,            // текущая рабочая память
     val longTermMemory: List<MemoryEntry>,           // текущая долговременная память
     val memoryCompressedMessages: List<AgentMessage>, // вытесненные сообщения (только UI)
     val isRefreshingWorkingMemory: Boolean,

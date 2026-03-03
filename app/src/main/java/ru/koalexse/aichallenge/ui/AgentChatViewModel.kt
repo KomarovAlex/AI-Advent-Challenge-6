@@ -11,9 +11,9 @@ import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import ru.koalexse.aichallenge.agent.Agent
 import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.AgentStreamEvent
+import ru.koalexse.aichallenge.agent.ConfigurableAgent
 import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
 import ru.koalexse.aichallenge.agent.context.facts.Fact
 import ru.koalexse.aichallenge.agent.context.memory.MemoryEntry
@@ -37,7 +37,7 @@ import ru.koalexse.aichallenge.ui.state.toSettingsData
 import java.util.UUID
 
 class AgentChatViewModel(
-    private val agent: Agent,
+    private val agent: ConfigurableAgent,
     private val availableModels: List<String>,
     private val chatHistoryRepository: ru.koalexse.aichallenge.data.persistence.ChatHistoryRepository? = null,
     initialStrategy: ContextStrategyType = ContextStrategyType.SUMMARY,
