@@ -25,6 +25,7 @@
     <string name="toolbar_checkpoint">Create checkpoint</string>
     <string name="toolbar_branches">Switch branch</string>
     <string name="toolbar_profiles">Profiles</string>
+    <string name="toolbar_more_actions">More actions</string>
 
     <!-- Layered Memory toolbar -->
     <string name="toolbar_refresh_working_memory">Update working memory 💼</string>
