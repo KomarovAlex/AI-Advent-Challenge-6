@@ -90,8 +90,10 @@ class AppModule(
     // ==================== Фабрика стратегий ====================
 
     /**
-     * Возвращает стратегию для обычного агента.
-     * TASK_STATE_MACHINE → null (агент управляет промптом сам через TaskStateMachineAgent).
+     * Возвращает стратегию обрезки контекста для обычного агента.
+     *
+     * Task State Machine — отдельный режим ([AgentChatViewModel.isPlanningMode]),
+     * не стратегия. Для него используется [createTaskStateMachineAgent].
      */
     fun buildStrategy(type: ContextStrategyType): ContextTruncationStrategy? = when (type) {
         ContextStrategyType.SLIDING_WINDOW -> SlidingWindowStrategy()
@@ -116,10 +118,6 @@ class AppModule(
             memoryStorage = JsonMemoryStorage(context),
             memoryModel = defaultModel,
         )
-
-        // TaskStateMachineAgent — самостоятельная сущность, не стратегия.
-        // innerAgent использует SUMMARY по умолчанию.
-        ContextStrategyType.TASK_STATE_MACHINE -> null
     }
 
     // ==================== Task State Machine ====================

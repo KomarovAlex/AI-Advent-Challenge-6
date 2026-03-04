@@ -81,9 +81,15 @@ ChatIntent
     → ChatScreen
 ```
 
-## Поток данных — Task State Machine (стратегия 6)
+## Поток данных — Planning mode (Task State Machine)
 
 ```
+Пользователь открывает настройки → включает Switch «Planning mode 🤖» → нажимает Save
+    → ChatIntent.SaveSettings(settingsData.copy(isPlanningMode = true))
+    → ViewModel.handleSettingsUpdate()
+    → isPlanningMode = true           ← activeAgent = taskStateMachineAgent
+    → taskStateMachineAgent.getTaskState()  ← загружаем сохранённое состояние
+
 ChatIntent.SendMessage
     → ViewModel.handleIntent()
     → activeAgent.send(message)       ← activeAgent = taskStateMachineAgent
@@ -105,16 +111,30 @@ ChatIntent.SendMessage
     → ChatScreen
 ```
 
+### Независимость Planning mode и стратегии контекста
+
+Planning mode и `ContextStrategyType` — **две независимые оси**:
+
+```
+isPlanningMode=false, activeStrategy=SUMMARY        ← обычный чат с суммаризацией
+isPlanningMode=true,  activeStrategy=SUMMARY        ← Planning mode (TSM использует свой innerAgent)
+isPlanningMode=false, activeStrategy=LAYERED_MEMORY ← чат с трёхслойной памятью
+isPlanningMode=true,  activeStrategy=LAYERED_MEMORY ← Planning mode поверх (независимо)
+```
+
+`TaskStateMachineAgent` использует собственный `innerAgent` со своей `SummaryStrategy` —
+не конфликтует с основным `agent`.
+
 ### Пауза и продолжение без повторных объяснений
 
 ```
-Сессия 1: пользователь работает на фазе EXECUTION
+Сессия 1: пользователь работает на фазе EXECUTION (Planning mode включён)
     → каждый ответ: taskStateStorage.save() → task_state.json
 
 Приложение закрыто
 
-Сессия 2: loadSavedHistory()
-    → taskStateMachineAgent.getTaskState()   ← читает task_state.json
+Сессия 2: пользователь открывает Settings → Planning mode уже включён (сохранено в SettingsData)
+    → handleSettingsUpdate() → taskStateMachineAgent.getTaskState()
     → _internalState.taskState = { phase: EXECUTION, currentStep: "...", ... }
     → следующий запрос: buildSystemPrompt() содержит ## Task State блок
     → LLM продолжает задачу без повторного объяснения контекста ✅
@@ -138,7 +158,7 @@ ChatIntent.SendMessage
 | `BranchStorage` | Хранилище веток — деталь стратегии |
 | `MemoryStorage` | Хранилище трёх слоёв памяти — деталь LayeredMemoryStrategy |
 | `TaskStateStorage` | Хранилище состояния задачи — деталь TaskStateMachineAgent |
-| `ViewModel` | MVI: Intent → State, capability accessors для стратегий |
+| `ViewModel` | MVI: Intent → State, capability accessors для стратегий, обработка Planning mode через SaveSettings |
 | `ChatHistoryRepository` | Persistence сессий (в `data/persistence/`) |
 
 ---
@@ -258,7 +278,7 @@ override suspend fun clearHistory() {
 ❌ Profile.rawText                              (только источник для извлечения фактов)
 ```
 
-### Стратегия 6 (через TaskStateMachineAgent → innerAgent)
+### Planning mode (через TaskStateMachineAgent → innerAgent)
 
 ```
 ✅ [system] ## User Profile              (от profilePromptProvider innerAgent)

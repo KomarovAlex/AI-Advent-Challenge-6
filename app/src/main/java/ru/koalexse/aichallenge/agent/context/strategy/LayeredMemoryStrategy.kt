@@ -169,7 +169,16 @@ class LayeredMemoryStrategy(
     suspend fun loadCompressedMessages(messages: List<AgentMessage>) =
         memoryStorage.setCompressedMessages(messages)
 
-    // ==================== Capability: полная очистка ====================
+    // ==================== Capability: очистка ====================
+
+    /**
+     * Очищает только WORKING-слой памяти.
+     *
+     * Вызывается из [TaskStateMachineAgent] при переходе между фазами:
+     * данные завершённой фазы устарели, итог уже зафиксирован в [PhaseOutput].
+     * LONG_TERM и compressed-сообщения не затрагиваются.
+     */
+    suspend fun clearWorkingMemory() = memoryStorage.replaceWorking(emptyList())
 
     /**
      * Полная очистка всех слоёв памяти, включая долговременную.

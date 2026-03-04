@@ -12,6 +12,9 @@ import ru.koalexse.aichallenge.domain.SessionTokenStats
 
 /**
  * Тип активной стратегии управления контекстом.
+ *
+ * Task State Machine намеренно отсутствует: это не стратегия обрезки контекста,
+ * а отдельный режим работы агента. Включается через [SettingsData.isPlanningMode].
  */
 enum class ContextStrategyType {
     /** Скользящее окно: хранятся только последние N сообщений */
@@ -33,14 +36,6 @@ enum class ContextStrategyType {
      * - LONG_TERM   — профиль, решения, знания (в LLM как system)
      */
     LAYERED_MEMORY,
-
-    /**
-     * Task State Machine: конечный автомат задачи.
-     * Фазы: PLANNING → EXECUTION → VALIDATION → DONE
-     * Каждый ответ LLM валидируется на соответствие инвариантам фазы.
-     * Состояние персистируется между сессиями (task_state.json).
-     */
-    TASK_STATE_MACHINE
 }
 
 data class ChatUiState(
@@ -61,6 +56,13 @@ data class ChatUiState(
 
     /** Активная стратегия управления контекстом */
     val activeStrategy: ContextStrategyType = ContextStrategyType.SUMMARY,
+
+    /**
+     * Режим планирования — использует TaskStateMachineAgent вместо обычного агента.
+     * Независим от [activeStrategy]: можно включить поверх любой стратегии контекста.
+     * Управляется через [SettingsData.isPlanningMode] в диалоге настроек.
+     */
+    val isPlanningMode: Boolean = false,
 
     // ==================== Sticky Facts ====================
 
@@ -111,7 +113,7 @@ data class ChatUiState(
     // ==================== Task State Machine ====================
 
     /**
-     * Текущее состояние задачи (только для TASK_STATE_MACHINE).
+     * Текущее состояние задачи (только когда [isPlanningMode] == true).
      * null = нет активной задачи.
      */
     val taskState: TaskState? = null,
@@ -134,8 +136,10 @@ data class SettingsData(
     val temperature: String? = null,
     val tokens: String? = null,
     val strategy: ContextStrategyType = ContextStrategyType.SUMMARY,
-    /** Максимальное число повторных попыток при нарушении инвариантов (TASK_STATE_MACHINE) */
-    val maxRetries: String? = null
+    /** Максимальное число повторных попыток при нарушении инвариантов (Planning mode) */
+    val maxRetries: String? = null,
+    /** Включён ли Planning mode (Task State Machine) */
+    val isPlanningMode: Boolean = false
 )
 
 fun AgentConfig.toSettingsData(strategy: ContextStrategyType = ContextStrategyType.SUMMARY) =

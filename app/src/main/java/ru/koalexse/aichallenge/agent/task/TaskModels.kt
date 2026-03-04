@@ -37,6 +37,35 @@ data class PhaseInvariants(
 )
 
 /**
+ * Итог одной завершённой фазы — передаётся в контекст следующей фазы.
+ *
+ * Записывается при переходе фазы: LLM добавляет тег `[OUTPUT: <текст>]` в конце
+ * ответа, агент извлекает его и сохраняет как [PhaseOutput]. Если тег отсутствует —
+ * используется fallback: последние N символов ответа.
+ *
+ * ### Зачем нужен
+ * Без [PhaseOutput] LLM на фазе EXECUTION видит только скользящее окно истории —
+ * план из PLANNING может уже «вытечь» за границу `keepRecentCount`. [PhaseOutput]
+ * гарантирует, что ключевые решения каждой фазы всегда присутствуют в system-промпте.
+ *
+ * ### Жизненный цикл
+ * - Создаётся: при переходе из фазы (в [TaskStateMachineAgent.transitionToPhase])
+ * - Хранится: в [TaskState.phaseOutputs] (персистируется в `task_state.json`)
+ * - Используется: в [TaskStateMachineAgent.buildSystemPromptBlock] (секция `## Completed phases`)
+ * - Сбрасывается: при [TaskStateMachineAgent.resetTask] (вместе с [TaskState])
+ *
+ * @param phase       фаза, итог которой зафиксирован
+ * @param output      краткий итог фазы (1–3 абзаца); извлекается из тега `[OUTPUT: ...]`
+ *                    или берётся как последние символы ответа LLM
+ * @param completedAt время завершения фазы (мс)
+ */
+data class PhaseOutput(
+    val phase: TaskPhase,
+    val output: String,
+    val completedAt: Long = System.currentTimeMillis()
+)
+
+/**
  * Полное состояние задачи — единица персистентности.
  *
  * ### Поля
@@ -45,11 +74,12 @@ data class PhaseInvariants(
  * @param currentStep     текстовое описание текущего шага (что делаем прямо сейчас)
  * @param expectedAction  что ожидается от пользователя или LLM на этом шаге
  * @param phaseInvariants инварианты по фазам (может быть задан subset фаз)
+ * @param phaseOutputs    итоги завершённых фаз; передаются в system-промпт следующих фаз
  * @param isActive        true = есть активная задача; false = нет задачи (начальное состояние)
  * @param retryCount      сколько раз подряд провалилась валидация текущего ответа LLM
  * @param createdAt       время создания задачи (мс)
  * @param updatedAt       время последнего обновления состояния (мс)
- * @param archivedTasks   список завершённых задач (история)
+ * @param archivedTasks   список завершённых задач (история между задачами)
  */
 data class TaskState(
     val taskId: String = "",
@@ -57,6 +87,7 @@ data class TaskState(
     val currentStep: String = "",
     val expectedAction: String = "",
     val phaseInvariants: List<PhaseInvariants> = emptyList(),
+    val phaseOutputs: List<PhaseOutput> = emptyList(),
     val isActive: Boolean = false,
     val retryCount: Int = 0,
     val createdAt: Long = System.currentTimeMillis(),
@@ -66,10 +97,18 @@ data class TaskState(
     /** Возвращает инварианты для текущей фазы (пустой список если не заданы). */
     val currentInvariants: List<String>
         get() = phaseInvariants.firstOrNull { it.phase == phase }?.rules ?: emptyList()
+
+    /** Возвращает итог указанной фазы, или null если фаза ещё не завершена. */
+    fun outputFor(phase: TaskPhase): String? =
+        phaseOutputs.firstOrNull { it.phase == phase }?.output
 }
 
 /**
  * Архивная запись завершённой задачи.
+ *
+ * Отличие от [PhaseOutput]: [ArchivedTask] — итог **всей задачи** целиком,
+ * хранится между задачами. [PhaseOutput] — итог **одной фазы**, хранится
+ * только внутри активной задачи и сбрасывается при [TaskStateMachineAgent.resetTask].
  *
  * @param taskId      идентификатор задачи
  * @param summary     краткое описание того, что было сделано (заполняется при DONE)
@@ -89,6 +128,7 @@ data class ArchivedTask(
  * - `[PHASE: execution]`       — предложить конкретную следующую фазу
  * - `[STEP: <описание>]`       — обновить текущий шаг без смены фазы
  * - `[EXPECTED: <действие>]`   — обновить ожидаемое действие
+ * - `[OUTPUT: <итог>]`         — зафиксировать итог фазы (парсится отдельно, не через TaskSignal)
  * - ничего                     — состояние не меняется
  */
 sealed class TaskSignal {

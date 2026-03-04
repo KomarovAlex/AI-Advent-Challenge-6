@@ -4,16 +4,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withContext
-import ru.koalexse.aichallenge.agent.AgentConfig
 import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.AgentRequest
-import ru.koalexse.aichallenge.agent.AgentResponse
 import ru.koalexse.aichallenge.agent.AgentStreamEvent
 import ru.koalexse.aichallenge.agent.ConfigurableAgent
 import ru.koalexse.aichallenge.agent.Role
 import ru.koalexse.aichallenge.agent.StatsLLMApi
-import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
-import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
+import ru.koalexse.aichallenge.agent.context.strategy.LayeredMemoryStrategy
 import ru.koalexse.aichallenge.domain.ApiMessage
 import ru.koalexse.aichallenge.domain.ChatRequest
 import ru.koalexse.aichallenge.domain.StatsStreamResult
@@ -33,25 +30,36 @@ import java.util.UUID
  * ```
  * Пользовательский запрос
  *         ↓
- * buildSystemPrompt(state)  ← profile + task state + invariants
+ * buildSystemPromptBlock(state)  ← profile + completed phases + task state + invariants
  *         ↓
- * innerAgent.send()         ← основной LLM-вызов
+ * innerAgent.send()              ← основной LLM-вызов
  *         ↓
- * parseSignal(response)     ← ищем [PHASE_COMPLETE] / [PHASE: X] / [STEP: X] / [EXPECTED: X]
+ * parseSignal(response)          ← ищем [PHASE_COMPLETE] / [PHASE: X] / [STEP: X] / [EXPECTED: X]
+ * extractPhaseOutput(response)   ← ищем [OUTPUT: <итог фазы>]
  *         ↓
- * validateWithLLM()         ← отдельный LLM-вызов: «инварианты соблюдены?»
- *     ↓ SUCCESS                   ↓ FAILURE (до maxRetries)
- * emit + updateState()      retry с violations в промпте
+ * validateWithLLM()              ← отдельный LLM-вызов: «инварианты соблюдены?»
+ *     ↓ SUCCESS                        ↓ FAILURE (до maxRetries)
+ * emit + updateState()           retry с violations в промпте
  *         ↓
- * transition(signal)        ← обновление фазы/шага/expected
+ * transition(signal)             ← обновление фазы/шага/expected + сохранение PhaseOutput
  *         ↓
- * taskStateStorage.save()   ← персистентность между сессиями
+ * clearWorkingMemoryIfNeeded()   ← сброс WORKING-памяти при смене фазы
+ *         ↓
+ * taskStateStorage.save()        ← персистентность между сессиями
  * ```
  *
  * ## Фазы автомата
  * ```
  * PLANNING → EXECUTION → VALIDATION → DONE → (новая задача)
  * ```
+ *
+ * ## Передача данных между фазами
+ * При переходе фазы агент:
+ * 1. Извлекает итог текущей фазы из тега `[OUTPUT: <текст>]` (или берёт fallback)
+ * 2. Сохраняет его в [TaskState.phaseOutputs]
+ * 3. Очищает WORKING-память ([LayeredMemoryStrategy]) — старые данные фазы уже не нужны
+ * Следующая фаза получает итоги всех завершённых фаз в секции `## Completed phases`
+ * system-промпта — даже если они вышли за пределы скользящего окна истории.
  *
  * ## Пауза и продолжение
  * При перезапуске приложения [taskStateStorage] восстанавливает состояние,
@@ -84,7 +92,6 @@ class TaskStateMachineAgent(
     override suspend fun send(message: String): Flow<AgentStreamEvent> {
         val state = taskStateStorage.getState()
         return if (!state.isActive) {
-            // Нет активной задачи — стандартное поведение
             innerAgent.send(message)
         } else {
             sendWithTaskState(message, state)
@@ -135,8 +142,9 @@ class TaskStateMachineAgent(
      * Ручной переход к следующей фазе с LLM-валидацией готовности.
      *
      * LLM проверяет: «достаточно ли сделано в текущей фазе для перехода?»
-     * Если нет — возвращает [AdvanceResult.NotReady] с объяснением.
-     * Если да — выполняет переход и возвращает [AdvanceResult.Advanced].
+     * Если нет — возвращает [AdvancePhaseResult.NotReady] с объяснением.
+     * Если да — сохраняет [PhaseOutput] текущей фазы, очищает WORKING-память
+     * и выполняет переход.
      *
      * @return результат попытки перехода
      */
@@ -146,7 +154,6 @@ class TaskStateMachineAgent(
 
         val nextPhase = state.phase.next() ?: return@withContext AdvancePhaseResult.AlreadyDone
 
-        // LLM-валидация готовности к переходу
         val history = innerAgent.conversationHistory.takeLast(VALIDATION_HISTORY_WINDOW)
         val readinessResult = checkPhaseReadiness(state, history)
 
@@ -154,19 +161,20 @@ class TaskStateMachineAgent(
             return@withContext AdvancePhaseResult.NotReady(readinessResult.violations)
         }
 
-        // Переход подтверждён
-        val newState = state.copy(
-            phase = nextPhase,
-            currentStep = defaultStepForPhase(nextPhase),
-            expectedAction = defaultExpectedForPhase(nextPhase),
-            retryCount = 0,
-            updatedAt = System.currentTimeMillis()
+        // Фиксируем итог текущей фазы из последнего ответа ассистента
+        val lastAssistantMessage = history.lastOrNull { it.role == Role.ASSISTANT }?.content ?: ""
+        val newState = transitionToPhase(
+            state = state,
+            next = nextPhase,
+            fullResponse = lastAssistantMessage,
+            now = System.currentTimeMillis()
         )
 
         if (nextPhase == TaskPhase.DONE) {
             val archived = archiveTask(state, history)
-            taskStateStorage.saveState(newState.copy(archivedTasks = archived))
-            return@withContext AdvancePhaseResult.Advanced(newState.copy(archivedTasks = archived))
+            val finalState = newState.copy(archivedTasks = archived)
+            taskStateStorage.saveState(finalState)
+            return@withContext AdvancePhaseResult.Advanced(finalState)
         }
 
         taskStateStorage.saveState(newState)
@@ -175,17 +183,17 @@ class TaskStateMachineAgent(
 
     /**
      * Сбрасывает текущую задачу (архивирует если была активна).
-     * После сброса [TaskState.isActive] = false.
+     * После сброса [TaskState.isActive] = false, [TaskState.phaseOutputs] очищаются.
      */
     suspend fun resetTask(): TaskState = withContext(Dispatchers.IO) {
         val current = taskStateStorage.getState()
         if (current.isActive && current.taskId.isNotEmpty()) {
-            // Архивируем незавершённую задачу
             val archived = ArchivedTask(
                 taskId = current.taskId,
                 summary = "Сброшена вручную на этапе ${current.phase.name}: ${current.currentStep}",
                 completedAt = System.currentTimeMillis()
             )
+            // phaseOutputs не переносим — они принадлежат только этой задаче
             val newState = TaskState(
                 archivedTasks = current.archivedTasks + archived
             )
@@ -222,7 +230,7 @@ class TaskStateMachineAgent(
      * Основной цикл:
      * 1. LLM-вызов через innerAgent
      * 2. Накопление полного ответа
-     * 3. Парсинг сигнала перехода
+     * 3. Парсинг сигнала перехода + извлечение PhaseOutput
      * 4. LLM-валидация инвариантов
      * 5a. SUCCESS → emit stream + updateState + transition
      * 5b. FAILURE → retry с violations (до maxRetries)
@@ -239,7 +247,6 @@ class TaskStateMachineAgent(
             val buffer = StringBuilder()
             val collectedEvents = mutableListOf<AgentStreamEvent>()
 
-            // Собираем поток innerAgent
             innerAgent.chatStream(currentRequest).collect { event ->
                 collectedEvents.add(event)
                 if (event is AgentStreamEvent.ContentDelta) {
@@ -249,7 +256,6 @@ class TaskStateMachineAgent(
 
             val fullResponse = buffer.toString()
 
-            // Если нет инвариантов — валидацию пропускаем
             val invariants = currentState.currentInvariants
             val validationResult = if (invariants.isEmpty()) {
                 ValidationResult(isValid = true)
@@ -260,10 +266,8 @@ class TaskStateMachineAgent(
             }
 
             if (validationResult.isValid) {
-                // SUCCESS — эмитируем накопленные события
                 collectedEvents.forEach { emit(it) }
 
-                // Обновляем состояние автомата
                 withContext(Dispatchers.IO) {
                     val signal = parseSignal(fullResponse)
                     val newState = applySignalAndTransition(currentState, signal, fullResponse)
@@ -272,16 +276,13 @@ class TaskStateMachineAgent(
                 return@flow
             }
 
-            // FAILURE — повтор с нарушениями
             attempt++
             if (attempt > maxRetries) {
-                // Исчерпаны попытки — отдаём ответ как есть с предупреждением
                 collectedEvents.forEach { emit(it) }
                 emit(AgentStreamEvent.ContentDelta(
                     "\n\n⚠️ Валидация не пройдена после $maxRetries попыток. " +
                     "Нарушения: ${validationResult.violations.joinToString("; ")}"
                 ))
-                // Сохраняем incremented retryCount
                 withContext(Dispatchers.IO) {
                     taskStateStorage.saveState(
                         currentState.copy(
@@ -293,7 +294,6 @@ class TaskStateMachineAgent(
                 return@flow
             }
 
-            // Строим retry-запрос с нарушениями
             currentRequest = buildRetryRequest(request, validationResult.violations, attempt)
             currentState = currentState.copy(retryCount = currentState.retryCount + 1)
         }
@@ -304,23 +304,22 @@ class TaskStateMachineAgent(
     /**
      * Встраивает task-блок в system-промпт.
      *
-     * Итоговый system-промпт:
+     * Итоговая структура:
      * ```
-     * <existingSystemPrompt>          ← от innerAgent (profile + defaultSystemPrompt)
+     * <existingSystemPrompt>
      *
-     * ## Task State
+     * ## Completed phases          ← итоги завершённых фаз (из phaseOutputs)
+     * ### PLANNING
+     * <итог фазы планирования>
+     *
+     * ## Task State                ← текущее состояние автомата
      * Phase: EXECUTION
-     * Current step: Написать функцию парсинга
-     * Expected action: Предоставить код функции
-     * Invariants:
-     * - Код должен быть на Kotlin
-     * - Не использовать глобальные переменные
+     * Current step: ...
+     * Expected action: ...
+     * Invariants for this phase:
+     * - ...
      *
-     * ## Instructions
-     * At the end of your response, if current step is complete, add: [PHASE_COMPLETE]
-     * To suggest a specific next phase: [PHASE: planning|execution|validation|done]
-     * To update the current step description: [STEP: description]
-     * To update the expected action: [EXPECTED: description]
+     * ## Instructions              ← теги для LLM
      * ```
      */
     private fun buildSystemPromptBlock(state: TaskState, existingPrompt: String?): String {
@@ -329,6 +328,16 @@ class TaskStateMachineAgent(
         if (!existingPrompt.isNullOrBlank()) {
             sb.appendLine(existingPrompt)
             sb.appendLine()
+        }
+
+        // Секция итогов завершённых фаз — передаёт контекст между фазами
+        if (state.phaseOutputs.isNotEmpty()) {
+            sb.appendLine("## Completed phases")
+            state.phaseOutputs.forEach { po ->
+                sb.appendLine("### ${po.phase.name}")
+                sb.appendLine(po.output)
+                sb.appendLine()
+            }
         }
 
         sb.appendLine("## Task State")
@@ -352,6 +361,7 @@ class TaskStateMachineAgent(
         sb.appendLine("To suggest a specific next phase: [PHASE: planning|execution|validation|done]")
         sb.appendLine("To update the current step description: [STEP: description]")
         sb.appendLine("To update the expected action: [EXPECTED: description]")
+        sb.appendLine("To summarize the current phase output for the next phase: [OUTPUT: summary text]")
         sb.append("Do NOT explain these tags — just append them silently.")
 
         return sb.toString().trimEnd()
@@ -385,6 +395,9 @@ class TaskStateMachineAgent(
      * 3. `[STEP: <text>]`      → [TaskSignal.UpdateStep]
      * 4. `[EXPECTED: <text>]`  → [TaskSignal.UpdateExpected]
      * 5. ничего                → [TaskSignal.None]
+     *
+     * Тег `[OUTPUT: ...]` обрабатывается отдельно в [extractPhaseOutput] —
+     * он не является сигналом перехода.
      */
     internal fun parseSignal(response: String): TaskSignal {
         val phaseTagRegex = Regex("""\[PHASE:\s*(\w+)\]""", RegexOption.IGNORE_CASE)
@@ -414,10 +427,41 @@ class TaskStateMachineAgent(
     }
 
     /**
+     * Извлекает итог фазы из тега `[OUTPUT: <текст>]` в ответе LLM.
+     *
+     * Если тег отсутствует — берёт последние [PHASE_OUTPUT_FALLBACK_LENGTH] символов
+     * ответа как fallback. Это гарантирует, что [PhaseOutput] всегда содержит
+     * осмысленный контент даже если LLM не добавил тег явно.
+     */
+    internal fun extractPhaseOutput(response: String): String {
+        // setOf(...) — правильный способ передать несколько RegexOption
+        val outputRegex = Regex(
+            pattern = """\[OUTPUT:\s*(.+?)\]""",
+            options = setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+        )
+        outputRegex.find(response)?.let { match ->
+            val extracted = match.groupValues[1].trim()
+            if (extracted.isNotEmpty()) return extracted
+        }
+        // Fallback: последние N символов ответа (без тегов автомата)
+        val cleaned = response
+            .replace(
+                regex = Regex(
+                    pattern = """\[(PHASE_COMPLETE|PHASE|STEP|EXPECTED|OUTPUT):[^\]]*\]""",
+                    option = RegexOption.IGNORE_CASE
+                ),
+                replacement = ""
+            )
+            .replace("[PHASE_COMPLETE]", "", ignoreCase = true)
+            .trim()
+        return cleaned.takeLast(PHASE_OUTPUT_FALLBACK_LENGTH).trim()
+    }
+
+    /**
      * Применяет [TaskSignal] к состоянию и возвращает новое состояние.
      *
-     * При [TaskSignal.PhaseComplete] и [TaskSignal.SuggestPhase] — переход к следующей фазе.
-     * При переходе в [TaskPhase.DONE] — архивирует задачу.
+     * При [TaskSignal.PhaseComplete] и [TaskSignal.SuggestPhase] — вызывает
+     * [transitionToPhase], который фиксирует [PhaseOutput] и очищает WORKING-память.
      */
     private suspend fun applySignalAndTransition(
         state: TaskState,
@@ -432,7 +476,6 @@ class TaskStateMachineAgent(
                 if (next != null) {
                     transitionToPhase(state, next, fullResponse, now)
                 } else {
-                    // Уже DONE — просто обновляем время
                     state.copy(retryCount = 0, updatedAt = now)
                 }
             }
@@ -455,14 +498,33 @@ class TaskStateMachineAgent(
         }
     }
 
+    /**
+     * Выполняет переход в фазу [next]:
+     * 1. Фиксирует [PhaseOutput] завершённой фазы из [fullResponse]
+     * 2. Очищает WORKING-память ([LayeredMemoryStrategy]) — данные старой фазы устарели
+     * 3. Возвращает новый [TaskState] с обновлённой фазой и сохранённым [PhaseOutput]
+     *
+     * При переходе в [TaskPhase.DONE] — задача помечается неактивной.
+     */
     private suspend fun transitionToPhase(
         state: TaskState,
         next: TaskPhase,
         fullResponse: String,
         now: Long
     ): TaskState {
+        // 1. Фиксируем итог завершённой фазы
+        val phaseOutput = PhaseOutput(
+            phase = state.phase,
+            output = extractPhaseOutput(fullResponse),
+            completedAt = now
+        )
+        val updatedOutputs = state.phaseOutputs + phaseOutput
+
+        // 2. Очищаем WORKING-память — данные завершённой фазы больше не актуальны
+        clearWorkingMemoryIfNeeded()
+
+        // 3. Строим новое состояние
         return if (next == TaskPhase.DONE) {
-            val archived = archiveTask(state, innerAgent.conversationHistory.takeLast(VALIDATION_HISTORY_WINDOW))
             state.copy(
                 phase = TaskPhase.DONE,
                 currentStep = "Задача завершена",
@@ -470,7 +532,7 @@ class TaskStateMachineAgent(
                 retryCount = 0,
                 isActive = false,
                 updatedAt = now,
-                archivedTasks = archived
+                phaseOutputs = updatedOutputs
             )
         } else {
             state.copy(
@@ -478,9 +540,24 @@ class TaskStateMachineAgent(
                 currentStep = defaultStepForPhase(next),
                 expectedAction = defaultExpectedForPhase(next),
                 retryCount = 0,
-                updatedAt = now
+                updatedAt = now,
+                phaseOutputs = updatedOutputs
             )
         }
+    }
+
+    /**
+     * Сбрасывает WORKING-память если [innerAgent] использует [LayeredMemoryStrategy].
+     *
+     * WORKING-память хранит данные текущей фазы (шаги, промежуточные результаты).
+     * При смене фазы эти данные устарели — новая фаза начинает с чистого листа.
+     * Итог завершённой фазы уже зафиксирован в [PhaseOutput] и попадёт в system-промпт.
+     *
+     * Если стратегия не [LayeredMemoryStrategy] — вызов игнорируется.
+     */
+    private suspend fun clearWorkingMemoryIfNeeded() {
+        val layeredStrategy = innerAgent.truncationStrategy as? LayeredMemoryStrategy
+        layeredStrategy?.clearWorkingMemory()
     }
 
     // ==================== Private: LLM-валидация ====================
@@ -523,9 +600,7 @@ class TaskStateMachineAgent(
         }
 
         val request = ChatRequest(
-            messages = listOf(
-                ApiMessage(role = "user", content = validationPrompt)
-            ),
+            messages = listOf(ApiMessage(role = "user", content = validationPrompt)),
             model = taskModel,
             temperature = 0f,
             max_tokens = 300L
@@ -568,9 +643,9 @@ class TaskStateMachineAgent(
     ): ValidationResult {
         val historyText = history.joinToString("\n") { msg ->
             val role = when (msg.role) {
-                Role.USER -> "User"
+                Role.USER      -> "User"
                 Role.ASSISTANT -> "Assistant"
-                Role.SYSTEM -> "System"
+                Role.SYSTEM    -> "System"
             }
             "$role: ${msg.content}"
         }
@@ -684,6 +759,12 @@ class TaskStateMachineAgent(
 
         /** Максимальная длина ответа LLM, передаваемая в контекст валидации */
         private const val MAX_VALIDATION_RESPONSE_LENGTH = 3000
+
+        /**
+         * Длина fallback-фрагмента ответа LLM, используемого как [PhaseOutput]
+         * если LLM не добавил тег `[OUTPUT: ...]`.
+         */
+        private const val PHASE_OUTPUT_FALLBACK_LENGTH = 500
     }
 }
 

@@ -176,6 +176,35 @@ fun createProfileEditViewModel(): ProfileEditViewModel {
 
 ---
 
+## JsonTaskStateStorage — персистенция Planning mode
+
+**Файл:** `task_state.json`
+
+Сохраняет полный `TaskState` — фазу, шаг, инварианты и архив завершённых задач.
+
+```kotlin
+class JsonTaskStateStorage(context: Context, fileName: String = "task_state.json") {
+    suspend fun getState(): TaskState       // читает файл; если нет — возвращает дефолт
+    suspend fun saveState(state: TaskState) // перезаписывает файл целиком
+    suspend fun reset()                     // isActive=false, архив сохраняется
+}
+```
+
+**Жизненный цикл данных:**
+
+| Операция | Что происходит с `task_state.json` |
+|----------|------------------------------------|
+| `startTask(...)` | Записывается новый `TaskState(isActive=true, phase=PLANNING)` |
+| Каждый ответ LLM | `saveState()` — фаза / шаг могут обновиться |
+| `ClearSession` (🧹) | **Не трогается** — задача переживает паузу |
+| `ResetTask` | `reset()` — `isActive=false`, архив сохраняется |
+| Приложение закрыто | Данные на диске, при следующем открытии `getState()` их прочитает |
+
+> `TaskStateMachineAgent` вызывает `saveState()` автоматически — ViewModel ничего не должна
+> делать явно для персистентности задачи.
+
+---
+
 ## JsonMemoryStorage — персистенция LayeredMemory
 
 Три **отдельных** файла, каждый со своим `Mutex`.
@@ -238,16 +267,17 @@ private val compressedMutex = Mutex()
 
 ## Файлы данных на устройстве
 
-| Файл | Содержимое |
-|------|------------|
-| `chat_history.json` | Сессии + сообщения + summaries |
-| `summaries.json` | Summaries (Summary-стратегия) |
-| `facts.json` | Key-value факты (StickyFacts) |
-| `branches.json` | Ветки диалога (Branching) |
-| `memory_working.json` | Рабочая память (LayeredMemory) |
-| `memory_long_term.json` | Долговременная память (LayeredMemory, persist навсегда) |
-| `memory_compressed.json` | Вытесненные сообщения для UI (LayeredMemory) |
-| `profiles.json` | Список профилей + id выбранного профиля |
+| Файл | Содержимое | Очищается при ClearSession? |
+|------|------------|-----------------------------|
+| `chat_history.json` | Сессии + сообщения + summaries | ✅ да |
+| `summaries.json` | Summaries (Summary-стратегия) | ✅ да |
+| `facts.json` | Key-value факты (StickyFacts) | ✅ да |
+| `branches.json` | Ветки диалога (Branching) | ✅ да |
+| `memory_working.json` | Рабочая память (LayeredMemory) | ✅ да |
+| `memory_long_term.json` | Долговременная память (LayeredMemory) | ❌ нет — persist навсегда |
+| `memory_compressed.json` | Вытесненные сообщения для UI (LayeredMemory) | ✅ да |
+| `task_state.json` | Состояние задачи (Planning mode) | ❌ нет — задача переживает паузы |
+| `profiles.json` | Список профилей + id выбранного профиля | ❌ нет |
 
 ---
 

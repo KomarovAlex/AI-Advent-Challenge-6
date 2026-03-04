@@ -8,7 +8,8 @@ class AgentChatViewModel(
     private val availableModels: List<String>,
     private val chatHistoryRepository: ChatHistoryRepository? = null,
     initialStrategy: ContextStrategyType = ContextStrategyType.SUMMARY,
-    private val strategyFactory: ((ContextStrategyType) -> ContextTruncationStrategy?)? = null
+    private val strategyFactory: ((ContextStrategyType) -> ContextTruncationStrategy?)? = null,
+    private val taskStateMachineAgent: TaskStateMachineAgent? = null  // null = Planning mode недоступен
 ) : ViewModel()
 ```
 
@@ -44,7 +45,7 @@ sealed class ChatIntent {
     data object ClearError
     data object ClearSession
     data object OpenSettings
-    data class SaveSettings(val settingsData: SettingsData)
+    data class SaveSettings(val settingsData: SettingsData)  // Planning mode управляется здесь
     // StickyFacts
     data object RefreshFacts
     // Branching
@@ -52,9 +53,16 @@ sealed class ChatIntent {
     data object OpenBranchDialog
     data class SwitchBranch(val branchId: String)
     // Layered Memory
-    data object RefreshWorkingMemory   // кнопка 💼 в тулбаре
-    data object RefreshLongTermMemory  // кнопка 🧠 в тулбаре
-    data object ClearAllMemory         // полная очистка памяти (включая LONG_TERM)
+    data object RefreshWorkingMemory
+    data object RefreshLongTermMemory
+    data object ClearAllMemory
+    // Task State Machine actions (доступны только в Planning mode)
+    data object OpenStartTaskDialog
+    data object CloseStartTaskDialog
+    data class StartTask(val phaseInvariants: List<PhaseInvariants>)
+    data object AdvancePhase
+    data object ResetTask
+    data object ClearTaskError
 }
 ```
 
@@ -78,14 +86,51 @@ private val layeredMemoryStrategy: LayeredMemoryStrategy?
     get() = agent.truncationStrategy as? LayeredMemoryStrategy
 ```
 
-### Смена стратегии в рантайме
+### Активный агент
 
 ```kotlin
-// applyStrategyChange() — вызывается при смене ContextStrategyType в настройках
-private suspend fun applyStrategyChange(newStrategyType: ContextStrategyType) {
-    val factory = strategyFactory ?: return
-    agent.updateTruncationStrategy(factory(newStrategyType))  // ConfigurableAgent
-    // ... сброс UI-данных, инициализация данных новой стратегии
+// Planning mode и стратегия контекста — независимые оси.
+// TSM использует собственный innerAgent, не конфликтует с agent.
+private val activeAgent: ConfigurableAgent
+    get() = if (_internalState.value.isPlanningMode && taskStateMachineAgent != null)
+        taskStateMachineAgent else agent
+```
+
+### Смена стратегии и Planning mode в рантайме
+
+Оба управляются через единый `SaveSettings` → `handleSettingsUpdate()`:
+
+```kotlin
+private fun handleSettingsUpdate(settingsData: SettingsData) {
+    val oldStrategy     = _internalState.value.activeStrategy
+    val newStrategy     = settingsData.strategy
+    val wasPlanningMode = _internalState.value.isPlanningMode
+    val nowPlanningMode = settingsData.isPlanningMode   // читаем из SettingsData
+
+    // Обновляем конфиг агента (модель, температура, токены)
+    agent.updateConfig(...)
+
+    _internalState.update {
+        it.copy(
+            settingsData   = settingsData,
+            isSettingsOpen = false,
+            activeStrategy = newStrategy,
+            isPlanningMode = nowPlanningMode,
+            taskValidationError = if (!nowPlanningMode) null else it.taskValidationError
+        )
+    }
+
+    when {
+        // Planning mode только что включён — загрузить состояние задачи
+        !wasPlanningMode && nowPlanningMode ->
+            viewModelScope.launch {
+                val savedTaskState = taskStateMachineAgent?.getTaskState()
+                _internalState.update { it.copy(taskState = savedTaskState) }
+            }
+        // Стратегия контекста изменилась — применить смену
+        newStrategy != oldStrategy && strategyFactory != null ->
+            viewModelScope.launch { applyStrategyChange(newStrategy) }
+    }
 }
 ```
 
@@ -99,28 +144,12 @@ Extension-функции для конвертации агентных моде
 Живут в `ui/` — знают про `isCompressed`, `isLoading` и другие UI-концепты.
 
 ```kotlin
-// Одно сообщение → UI
 fun AgentMessage.toUiMessage(id, tokenStats?, responseDurationMs?, isCompressed): Message
-
-// Summaries → сжатые UI-сообщения (isCompressed=true)
 fun List<ConversationSummary>.toCompressedUiMessages(): List<Message>
-
-// Compressed от StickyFacts → UI (isCompressed=true)
 fun List<AgentMessage>.toFactsCompressedUiMessages(): List<Message>
-
-// Compressed от LayeredMemory → UI (isCompressed=true)
 fun List<AgentMessage>.toMemoryCompressedUiMessages(): List<Message>
-
-// WORKING memory entries → специальный UI-Message для WorkingMemoryBubble
-// Возвращает null если список пуст
-fun List<MemoryEntry>.toWorkingMemoryUiMessage(): Message?
-
-// LONG_TERM memory entries → специальный UI-Message для LongTermMemoryBubble
-// Возвращает null если список пуст
-fun List<MemoryEntry>.toLongTermMemoryUiMessage(): Message?
-
-// Активная история → UI-сообщения
-// Последнему ответу ассистента проставляются stats и duration
+fun List<MemoryEntry>.toWorkingMemoryUiMessage(): Message?    // null если пуст
+fun List<MemoryEntry>.toLongTermMemoryUiMessage(): Message?   // null если пуст
 fun List<AgentMessage>.toActiveUiMessages(lastMessageStats?, lastMessageDuration?): List<Message>
 ```
 
@@ -141,6 +170,13 @@ data class ChatUiState(
     val compressedMessageCount: Int,
     val activeStrategy: ContextStrategyType,
 
+    /**
+     * Режим планирования — использует TaskStateMachineAgent вместо обычного агента.
+     * Независим от activeStrategy: включается поверх любой стратегии контекста.
+     * Управляется через SettingsData.isPlanningMode в диалоге настроек.
+     */
+    val isPlanningMode: Boolean,
+
     // StickyFacts
     val facts: List<Fact>,
     val isRefreshingFacts: Boolean,
@@ -153,11 +189,18 @@ data class ChatUiState(
     val isBranchDialogOpen: Boolean,
 
     // Layered Memory
-    val workingMemory: List<MemoryEntry>,            // текущая рабочая память
-    val longTermMemory: List<MemoryEntry>,           // текущая долговременная память
-    val memoryCompressedMessages: List<AgentMessage>, // вытесненные сообщения (только UI)
+    val workingMemory: List<MemoryEntry>,
+    val longTermMemory: List<MemoryEntry>,
+    val memoryCompressedMessages: List<AgentMessage>,
     val isRefreshingWorkingMemory: Boolean,
-    val isRefreshingLongTermMemory: Boolean
+    val isRefreshingLongTermMemory: Boolean,
+
+    // Task State Machine (только когда isPlanningMode == true)
+    val taskState: TaskState?,
+    val isValidatingTask: Boolean,
+    val taskValidationError: String?,
+    val isAdvancingPhase: Boolean,
+    val isStartTaskDialogOpen: Boolean
 )
 ```
 
@@ -166,12 +209,18 @@ data class ChatUiState(
 ## ContextStrategyType
 
 ```kotlin
+/**
+ * Тип активной стратегии управления контекстом.
+ *
+ * Task State Machine намеренно отсутствует: это не стратегия обрезки контекста,
+ * а отдельный режим работы агента. Включается через SettingsData.isPlanningMode.
+ */
 enum class ContextStrategyType {
-    SLIDING_WINDOW,   // Скользящее окно, нет компрессии
-    STICKY_FACTS,     // Key-value факты + скользящее окно
-    BRANCHING,        // Ветки диалога
-    SUMMARY,          // LLM-суммаризация
-    LAYERED_MEMORY    // Трёхслойная модель памяти: SHORT_TERM + WORKING + LONG_TERM
+    SLIDING_WINDOW,
+    STICKY_FACTS,
+    BRANCHING,
+    SUMMARY,
+    LAYERED_MEMORY
 }
 ```
 
@@ -193,16 +242,35 @@ fun ContextStrategyType.displayName(): String = when (this) {
 ```kotlin
 data class SettingsData(
     val model: String,
-    val temperature: String?,
-    val tokens: String?,
-    val strategy: ContextStrategyType = ContextStrategyType.SUMMARY
+    val temperature: String? = null,
+    val tokens: String? = null,
+    val strategy: ContextStrategyType = ContextStrategyType.SUMMARY,
+    val maxRetries: String? = null,
+    /** Включён ли Planning mode (Task State Machine) */
+    val isPlanningMode: Boolean = false
 )
 ```
 
 Добавить новое поле в настройки:
 1. Добавить в `SettingsData`
-2. Добавить в `AgentConfig`
-3. Обновить `Dialog.kt`
+2. Добавить в `AgentConfig` если нужно влиять на агента
+3. Обновить `Dialog.kt` (добавить UI-поле в `MultiFieldInputDialog`)
+
+---
+
+## Диалог настроек — MultiFieldInputDialog
+
+**Файл:** `ui/Dialog.kt`
+
+Порядок полей в диалоге:
+1. **Выбор модели** — `ExposedDropdownMenuBox`
+2. **Planning mode 🤖** — `Switch` в строке с лейблом (`Row` + `SpaceBetween`)
+3. **Context strategy** — `ExposedDropdownMenuBox` (5 стратегий, без TSM)
+4. **Temperature** — `OutlinedTextField`
+5. **Max tokens** — `OutlinedTextField`
+
+Planning mode включается через этот Switch — не через тулбар.
+Состояние хранится в `SettingsData.isPlanningMode` и передаётся в `SaveSettings`.
 
 ---
 
@@ -255,14 +323,24 @@ when {
 
 ---
 
-## Тулбар: кнопки по стратегиям
+## Тулбар: кнопки по режимам
 
-| Стратегия | Кнопки |
-|-----------|--------|
-| `STICKY_FACTS` | ✨ `AutoAwesome` — Refresh Facts |
-| `BRANCHING` | 🔖 `Bookmark` — Create Checkpoint, 🌿 `AccountTree` — Switch Branch |
-| `LAYERED_MEMORY` | 💼 `Work` — Refresh Working Memory, 🧠 `Psychology` — Refresh Long-Term Memory |
-| все | ⚙️ `Settings`, 🧹 `CleaningServices` — Clear Session |
+| Элемент | Условие показа | Действие |
+|---------|---------------|----------|
+| ▶ `PlayArrow` | `isPlanningMode && (!hasActiveTask \|\| isTaskDone)` | `OpenStartTaskDialog` |
+| `Refresh` → Next Phase | `isPlanningMode && hasActiveTask && !isTaskDone` | `AdvancePhase` |
+| ✨ `AutoAwesome` | `STICKY_FACTS` | `RefreshFacts` |
+| 🔖 `Bookmark` | `BRANCHING` | `CreateCheckpoint` |
+| 🌿 `AccountTree` | `BRANCHING` | `OpenBranchDialog` |
+| 💼 `Work` | `LAYERED_MEMORY` | `RefreshWorkingMemory` |
+| 🧠 `Psychology` | `LAYERED_MEMORY` | `RefreshLongTermMemory` |
+| 👤 `Person` | все | Навигация к профилям |
+| ⚙️ `Settings` | `SLIDING_WINDOW`, `SUMMARY` (как иконка), остальные — в overflow | `OpenSettings` |
+| «Reset task» (overflow) | `isPlanningMode && hasActiveTask` | `ResetTask` |
+| «Clear session» (overflow) | **всегда** | `ClearSession` |
+
+> Planning mode включается через Switch в диалоге настроек — **не** в тулбаре.
+> Кнопки управления задачей (▶ / →) появляются в тулбаре **после** включения режима.
 
 ---
 
@@ -276,12 +354,15 @@ when {
 5. `layeredMemoryStrategy?.getWorkingMemory()` — через capability
 6. `layeredMemoryStrategy?.getLongTermMemory()` — через capability (persist между сессиями)
 7. `layeredMemoryStrategy?.getCompressedMessages()` — через capability
+8. Если `isPlanningMode`: `taskStateMachineAgent?.getTaskState()` — состояние задачи
 
 **Сохранение** (`saveHistory`):
 1. `agent.conversationHistory` → `toSession()`
 2. `summaryStrategy?.getSummaries()` → включается в сессию
 3. `chatHistoryRepository.saveSession(session)`
 
+> TaskStateMachineAgent сохраняет своё состояние автоматически через `JsonTaskStateStorage`
+> при каждом ответе — отдельного шага не нужно.
 > MemoryStorage сохраняет данные сам при каждом `replace*` — отдельного шага не нужно.
 
 ---
@@ -323,7 +404,7 @@ data class ProfileListState(
     val selectedProfileId: String = Profile.DEFAULT_PROFILE_ID,
     val isLoading: Boolean = false,
     val error: String? = null,
-    val pendingDeleteId: String? = null   // id профиля, ожидающего подтверждения удаления
+    val pendingDeleteId: String? = null
 )
 ```
 
@@ -342,7 +423,7 @@ sealed class ProfileEditIntent {
 data class ProfileEditState(
     val profile: Profile = Profile(),
     val isLoading: Boolean = false,
-    val isSaved: Boolean = false,   // true → экран закрывается и возвращается назад
+    val isSaved: Boolean = false,
     val error: String? = null
 )
 ```
@@ -354,13 +435,9 @@ class ProfileListViewModel(storage: JsonProfileStorage) : ViewModel()
 
 class ProfileEditViewModel(
     storage: JsonProfileStorage,
-    summaryProvider: SummaryProvider   // LLMSummaryProvider с FACTS_EXTRACTION_PROMPT
+    summaryProvider: SummaryProvider
 ) : ViewModel()
 ```
 
 Оба получают один и тот же экземпляр `JsonProfileStorage` из `AppModule.profileStorage`.
 Создаются через `AppModule.createProfileListViewModel()` / `AppModule.createProfileEditViewModel()`.
-
-> `ProfileEditViewModel` принимает `summaryProvider` — использует `LLMSummaryProvider`
-> с `FACTS_EXTRACTION_PROMPT` для LLM-извлечения фактов из `rawText`.
-> Провайдер создаётся в `AppModule.createProfileEditViewModel()`.

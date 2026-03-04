@@ -9,6 +9,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import ru.koalexse.aichallenge.agent.task.ArchivedTask
 import ru.koalexse.aichallenge.agent.task.PhaseInvariants
+import ru.koalexse.aichallenge.agent.task.PhaseOutput
 import ru.koalexse.aichallenge.agent.task.TaskPhase
 import ru.koalexse.aichallenge.agent.task.TaskState
 import ru.koalexse.aichallenge.agent.task.TaskStateStorage
@@ -23,6 +24,7 @@ private data class PersistedTaskState(
     val currentStep: String = "",
     val expectedAction: String = "",
     val phaseInvariants: List<PersistedPhaseInvariants> = emptyList(),
+    val phaseOutputs: List<PersistedPhaseOutput> = emptyList(),
     val isActive: Boolean = false,
     val retryCount: Int = 0,
     val createdAt: Long = System.currentTimeMillis(),
@@ -33,6 +35,12 @@ private data class PersistedTaskState(
 private data class PersistedPhaseInvariants(
     val phase: String,
     val rules: List<String>
+)
+
+private data class PersistedPhaseOutput(
+    val phase: String,
+    val output: String,
+    val completedAt: Long
 )
 
 private data class PersistedArchivedTask(
@@ -75,7 +83,7 @@ class JsonTaskStateStorage(private val context: Context) : TaskStateStorage {
 
     override suspend fun reset() {
         mutex.withLock {
-            // Сохраняем архив при сбросе
+            // Сохраняем архив при сбросе, phaseOutputs сбрасываются вместе с задачей
             val archive = cached?.archivedTasks ?: emptyList()
             cached = TaskState(archivedTasks = archive)
             saveLocked()
@@ -125,6 +133,9 @@ class JsonTaskStateStorage(private val context: Context) : TaskStateStorage {
         phaseInvariants = phaseInvariants.map { inv ->
             PersistedPhaseInvariants(phase = inv.phase.name, rules = inv.rules)
         },
+        phaseOutputs = phaseOutputs.map { po ->
+            PersistedPhaseOutput(phase = po.phase.name, output = po.output, completedAt = po.completedAt)
+        },
         isActive = isActive,
         retryCount = retryCount,
         createdAt = createdAt,
@@ -143,6 +154,13 @@ class JsonTaskStateStorage(private val context: Context) : TaskStateStorage {
             PhaseInvariants(
                 phase = runCatching { TaskPhase.valueOf(inv.phase) }.getOrDefault(TaskPhase.PLANNING),
                 rules = inv.rules
+            )
+        },
+        phaseOutputs = phaseOutputs.map { po ->
+            PhaseOutput(
+                phase = runCatching { TaskPhase.valueOf(po.phase) }.getOrDefault(TaskPhase.PLANNING),
+                output = po.output,
+                completedAt = po.completedAt
             )
         },
         isActive = isActive,

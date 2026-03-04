@@ -2,6 +2,7 @@ package ru.koalexse.aichallenge.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenuItem
@@ -10,6 +11,7 @@ import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -17,6 +19,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
@@ -27,7 +30,6 @@ import ru.koalexse.aichallenge.agent.task.PhaseInvariants
 import ru.koalexse.aichallenge.agent.task.TaskPhase
 import ru.koalexse.aichallenge.ui.state.ContextStrategyType
 import ru.koalexse.aichallenge.ui.state.SettingsData
-import ru.koalexse.aichallenge.ui.state.displayName
 import ru.koalexse.aichallenge.ui.state.isEmpty
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -83,7 +85,24 @@ fun MultiFieldInputDialog(
                     }
                 }
 
+                // ── Planning mode ─────────────────────────────────────────────
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(stringResource(R.string.settings_planning_mode_label))
+                    Switch(
+                        checked = settingsData.isPlanningMode,
+                        onCheckedChange = {
+                            settingsData = settingsData.copy(isPlanningMode = it)
+                        }
+                    )
+                }
+
                 // ── Выбор стратегии ───────────────────────────────────────────
+                // TASK_STATE_MACHINE намеренно исключён: это не стратегия контекста,
+                // а отдельный режим работы. Переключается чекбоксом «Planning mode» выше.
                 ExposedDropdownMenuBox(
                     expanded = strategyDropdownExpanded,
                     onExpandedChange = { strategyDropdownExpanded = it }
@@ -135,17 +154,6 @@ fun MultiFieldInputDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-
-                // ── Max Retries (только для TASK_STATE_MACHINE) ───────────────
-                if (settingsData.strategy == ContextStrategyType.TASK_STATE_MACHINE) {
-                    OutlinedTextField(
-                        value = settingsData.maxRetries ?: "",
-                        onValueChange = { settingsData = settingsData.copy(maxRetries = it) },
-                        label = { Text("Max retries (validation)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
             }
         },
         confirmButton = {
@@ -215,7 +223,7 @@ fun BranchSwitchDialog(
 }
 
 /**
- * Диалог запуска новой задачи (Task State Machine).
+ * Диалог запуска новой задачи (Planning mode / Task State Machine).
  *
  * Пользователь вводит инварианты для каждой фазы в отдельные поля.
  * Формат ввода: одно правило на строку. Пустые поля — нет инвариантов для фазы.
@@ -320,12 +328,11 @@ private fun buildPhaseInvariants(
 }
 
 fun ContextStrategyType.displayName(): String = when (this) {
-    ContextStrategyType.SLIDING_WINDOW      -> "Sliding Window"
-    ContextStrategyType.STICKY_FACTS        -> "Sticky Facts"
-    ContextStrategyType.BRANCHING           -> "Branching"
-    ContextStrategyType.SUMMARY             -> "Summary (LLM)"
-    ContextStrategyType.LAYERED_MEMORY      -> "Layered Memory 🧠"
-    ContextStrategyType.TASK_STATE_MACHINE  -> "Task State Machine 🤖"
+    ContextStrategyType.SLIDING_WINDOW -> "Sliding Window"
+    ContextStrategyType.STICKY_FACTS   -> "Sticky Facts"
+    ContextStrategyType.BRANCHING      -> "Branching"
+    ContextStrategyType.SUMMARY        -> "Summary (LLM)"
+    ContextStrategyType.LAYERED_MEMORY -> "Layered Memory 🧠"
 }
 
 // ==================== Previews ====================
@@ -333,6 +340,15 @@ fun ContextStrategyType.displayName(): String = when (this) {
 @[Composable Preview]
 fun MultiFieldInputDialogPreview() {
     MultiFieldInputDialog(
+        availableModels = listOf("deepseek-v3.2"),
+        onDismiss = {}
+    ) {}
+}
+
+@[Composable Preview]
+fun MultiFieldInputDialogPlanningModePreview() {
+    MultiFieldInputDialog(
+        settings = SettingsData(model = "deepseek-v3.2", isPlanningMode = true),
         availableModels = listOf("deepseek-v3.2"),
         onDismiss = {}
     ) {}

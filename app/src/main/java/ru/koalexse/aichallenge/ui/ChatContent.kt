@@ -54,6 +54,7 @@ fun ChatContent(
     var overflowExpanded by remember { mutableStateOf(false) }
 
     // Локальные снимки task-state для избежания проблем со smart cast делегированного свойства
+    val isPlanningMode = uiState.isPlanningMode
     val taskState = uiState.taskState
     val hasActiveTask = taskState?.isActive == true
     val taskPhase = taskState?.phase
@@ -67,18 +68,44 @@ fun ChatContent(
         topBar = {
             TopAppBar(
                 title = {
-                    // Для TASK_STATE_MACHINE — показываем фазу в заголовке
-                    if (uiState.activeStrategy == ContextStrategyType.TASK_STATE_MACHINE &&
-                        hasActiveTask && taskPhase != null
-                    ) {
+                    // В Planning mode — показываем фазу в заголовке если задача активна
+                    if (isPlanningMode && hasActiveTask && taskPhase != null) {
                         Text("${taskPhase.displayName()} · ${uiState.settingsData.model}")
                     } else {
                         Text(uiState.settingsData.model)
                     }
                 },
                 actions = {
-                    // ── Strategy-specific primary actions (≤ 2 icon buttons) ──────────
+                    // ── Planning mode actions ─────────────────────────────────────────
+                    // Кнопки управления задачей — только в Planning mode
+                    if (isPlanningMode) {
+                        if (!hasActiveTask || isTaskDone) {
+                            // Кнопка «▶ Новая задача»
+                            IconButton(
+                                onClick = { handleIntent(ChatIntent.OpenStartTaskDialog) },
+                                enabled = !uiState.isLoading
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = "Start new task"
+                                )
+                            }
+                        } else {
+                            // Кнопка «→ Следующая фаза»
+                            IconButton(
+                                onClick = { handleIntent(ChatIntent.AdvancePhase) },
+                                enabled = !uiState.isLoading && !uiState.isAdvancingPhase
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "Advance to next phase"
+                                )
+                            }
+                        }
+                    }
 
+                    // ── Strategy-specific primary actions ─────────────────────────────
+                    // Кнопки стратегии контекста независимы от Planning mode
                     when (uiState.activeStrategy) {
 
                         ContextStrategyType.STICKY_FACTS -> {
@@ -149,41 +176,6 @@ fun ChatContent(
                             }
                         }
 
-                        ContextStrategyType.TASK_STATE_MACHINE -> {
-                            // Кнопка «▶ Новая задача» или «→ Следующая фаза»
-                            if (!hasActiveTask || isTaskDone) {
-                                IconButton(
-                                    onClick = { handleIntent(ChatIntent.OpenStartTaskDialog) },
-                                    enabled = !uiState.isLoading
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.PlayArrow,
-                                        contentDescription = "Start new task"
-                                    )
-                                }
-                            } else {
-                                IconButton(
-                                    onClick = { handleIntent(ChatIntent.AdvancePhase) },
-                                    enabled = !uiState.isLoading && !uiState.isAdvancingPhase
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Refresh,
-                                        contentDescription = "Advance to next phase"
-                                    )
-                                }
-                            }
-
-                            IconButton(
-                                onClick = onNavigateToProfiles,
-                                enabled = !uiState.isLoading
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Person,
-                                    contentDescription = stringResource(R.string.toolbar_profiles)
-                                )
-                            }
-                        }
-
                         else -> {
                             IconButton(
                                 onClick = onNavigateToProfiles,
@@ -219,8 +211,22 @@ fun ChatContent(
                         expanded = overflowExpanded,
                         onDismissRequest = { overflowExpanded = false }
                     ) {
-                        when (uiState.activeStrategy) {
+                        // Planning mode: Reset task в overflow
+                        if (isPlanningMode && hasActiveTask) {
+                            DropdownMenuItem(
+                                text = { Text("Reset task") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.CleaningServices, contentDescription = null)
+                                },
+                                onClick = {
+                                    overflowExpanded = false
+                                    handleIntent(ChatIntent.ResetTask)
+                                },
+                                enabled = !uiState.isLoading
+                            )
+                        }
 
+                        when (uiState.activeStrategy) {
                             ContextStrategyType.STICKY_FACTS -> {
                                 // Profiles is already an icon; Settings + Clear go here
                             }
@@ -238,23 +244,6 @@ fun ChatContent(
                                     },
                                     enabled = !uiState.isLoading
                                 )
-                            }
-
-                            ContextStrategyType.TASK_STATE_MACHINE -> {
-                                // Reset task (если есть активная задача)
-                                if (hasActiveTask) {
-                                    DropdownMenuItem(
-                                        text = { Text("Reset task") },
-                                        leadingIcon = {
-                                            Icon(Icons.Default.CleaningServices, contentDescription = null)
-                                        },
-                                        onClick = {
-                                            overflowExpanded = false
-                                            handleIntent(ChatIntent.ResetTask)
-                                        },
-                                        enabled = !uiState.isLoading
-                                    )
-                                }
                             }
 
                             else -> { /* Profiles + Settings already shown as icons */ }
@@ -311,7 +300,7 @@ fun ChatContent(
         )
     }
 
-    // ── Start Task dialog (Task State Machine) ────────────────────────────
+    // ── Start Task dialog (Planning mode) ─────────────────────────────────
     if (uiState.isStartTaskDialogOpen) {
         StartTaskDialog(
             onDismiss = { handleIntent(ChatIntent.CloseStartTaskDialog) },
@@ -340,7 +329,25 @@ fun ChatContent(
 @[Composable Preview]
 fun ContentPreview() {
     ChatContent(
-        state = remember { mutableStateOf(ChatUiState(settingsData = SettingsData("deepseek-v3.2"))) },
+        state = remember {
+            mutableStateOf(ChatUiState(settingsData = SettingsData("deepseek-v3.2")))
+        },
+        handleIntent = {},
+        onNavigateToProfiles = {}
+    )
+}
+
+@[Composable Preview]
+fun ContentPlanningModePreview() {
+    ChatContent(
+        state = remember {
+            mutableStateOf(
+                ChatUiState(
+                    settingsData = SettingsData("deepseek-v3.2", isPlanningMode = true),
+                    isPlanningMode = true
+                )
+            )
+        },
         handleIntent = {},
         onNavigateToProfiles = {}
     )
