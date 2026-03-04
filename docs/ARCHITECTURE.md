@@ -65,20 +65,59 @@ persistence-моделями (`Persisted*`). Перенос интерфейса
 
 ---
 
-## Поток данных
+## Поток данных — обычный агент (стратегии 1–5)
 
 ```
 ChatIntent
     → ViewModel.handleIntent()
     → agent.send(message)
     → SimpleLLMAgent.chatStream()
-        → buildMessageList()          [profile block] + [system] + [memory layers] + [history]
+        → buildMessageList()          [profile block] + [system] + [strategy system] + [history]
         → api.sendMessageStream()     OkHttp SSE
         → Flow<StatsStreamResult>
     → Flow<AgentStreamEvent>
     → ViewModel._internalState
     → ChatUiState
     → ChatScreen
+```
+
+## Поток данных — Task State Machine (стратегия 6)
+
+```
+ChatIntent.SendMessage
+    → ViewModel.handleIntent()
+    → activeAgent.send(message)       ← activeAgent = taskStateMachineAgent
+    → TaskStateMachineAgent.send()
+        → buildSystemPrompt(taskState)  ← инжектирует ## Task State блок
+        → innerAgent.chatStream()       ← SimpleLLMAgent + SummaryStrategy
+            → api.sendMessageStream()
+        ↓ накапливает fullResponse
+        → parseSignal(fullResponse)     ← [PHASE_COMPLETE] / [PHASE: X] / [STEP: X]
+        → validateWithLLM()             ← отдельный LLM-вызов (если есть инварианты)
+            ↓ VALID                          ↓ INVALID (retry до maxRetries)
+        emit stream                   buildRetryRequest(violations)
+        applySignalAndTransition()    повторный innerAgent.chatStream()
+        taskStateStorage.save()
+    → Flow<AgentStreamEvent>
+    → ViewModel._internalState
+        → taskState = taskStateMachineAgent.getTaskState()
+    → ChatUiState (taskState, phase в заголовке тулбара)
+    → ChatScreen
+```
+
+### Пауза и продолжение без повторных объяснений
+
+```
+Сессия 1: пользователь работает на фазе EXECUTION
+    → каждый ответ: taskStateStorage.save() → task_state.json
+
+Приложение закрыто
+
+Сессия 2: loadSavedHistory()
+    → taskStateMachineAgent.getTaskState()   ← читает task_state.json
+    → _internalState.taskState = { phase: EXECUTION, currentStep: "...", ... }
+    → следующий запрос: buildSystemPrompt() содержит ## Task State блок
+    → LLM продолжает задачу без повторного объяснения контекста ✅
 ```
 
 ---
@@ -90,6 +129,7 @@ ChatIntent
 | `Agent` | Read-only контракт: история, запросы, ветки |
 | `ConfigurableAgent` | Мутирующее расширение `Agent`: смена конфига и стратегии в рантайме |
 | `SimpleLLMAgent` | Реализация `ConfigurableAgent`: инкапсуляция истории, отправка запросов, делегирование стратегии |
+| `TaskStateMachineAgent` | Обёртка над `ConfigurableAgent`: конечный автомат задачи, валидация инвариантов, архивирование |
 | `AgentContext` | Приватное хранилище сообщений (`synchronized`) |
 | `ProfileSystemPromptProvider` | Формирование блока профиля для system-промпта (динамически при каждом запросе) |
 | `ContextTruncationStrategy` | Логика обрезки, компрессии, очистки своего состояния |
@@ -97,6 +137,7 @@ ChatIntent
 | `FactsStorage` | Хранилище фактов — деталь стратегии |
 | `BranchStorage` | Хранилище веток — деталь стратегии |
 | `MemoryStorage` | Хранилище трёх слоёв памяти — деталь LayeredMemoryStrategy |
+| `TaskStateStorage` | Хранилище состояния задачи — деталь TaskStateMachineAgent |
 | `ViewModel` | MVI: Intent → State, capability accessors для стратегий |
 | `ChatHistoryRepository` | Persistence сессий (в `data/persistence/`) |
 
@@ -121,6 +162,14 @@ ChatIntent
   // только через ConfigurableAgent:
   agent.updateConfig(newConfig)      ──►  synchronized { _config = newConfig }
   agent.updateTruncationStrategy(s)  ──►  synchronized { _truncationStrategy = s }
+```
+
+```
+TaskStateMachineAgent — дополнительные методы (не в ConfigurableAgent):
+  taskAgent.startTask(phaseInvariants)   ──►  TaskState (phase=PLANNING, isActive=true)
+  taskAgent.advancePhase()               ──►  LLM-валидация → AdvancePhaseResult
+  taskAgent.resetTask()                  ──►  архивировать + сбросить
+  taskAgent.getTaskState()               ←──  taskStateStorage.getState()
 ```
 
 ```
@@ -152,6 +201,8 @@ ChatIntent
 | `getLongTermMemory` | ❌ нет — чистый I/O со storage | `truncationStrategy as? LayeredMemory...` |
 | `refreshWorkingMemory` | ❌ нет — LLM-вызов + I/O | `truncationStrategy as? LayeredMemory...` |
 | `refreshLongTermMemory` | ❌ нет — LLM-вызов + I/O | `truncationStrategy as? LayeredMemory...` |
+| `startTask` | ❌ нет — только taskStateStorage | `taskStateMachineAgent` |
+| `advancePhase` | ❌ нет — LLM-вызов + I/O | `taskStateMachineAgent` |
 
 ---
 
@@ -167,18 +218,6 @@ override suspend fun clearHistory() {
 }
 ```
 
-### Особый случай: LayeredMemoryStrategy.clear()
-
-`LayeredMemoryStrategy.clear()` вызывает `memoryStorage.clearSession()` — это очищает
-только WORKING и compressed. **LONG_TERM намеренно не очищается** при сбросе сессии:
-
-```kotlin
-// MemoryStorage.clearSession():
-_working    = emptyList()   // ← очищается
-_compressed = emptyList()   // ← очищается
-// _longTerm               // ← намеренно не трогаем
-```
-
 ---
 
 ## Потокобезопасность
@@ -192,25 +231,17 @@ _compressed = emptyList()   // ← очищается
 | `JsonBranchStorage` | `Mutex` | suspend + IO |
 | `JsonMemoryStorage` | три `Mutex` (по одному на слой) | suspend + IO, слои независимы |
 | `InMemoryMemoryStorage` | `Mutex` | suspend + IO |
+| `InMemoryTaskStateStorage` | `Mutex` | suspend + IO |
+| `JsonTaskStateStorage` | `Mutex` | suspend + IO |
 | `JsonProfileStorage` | `Mutex` | suspend + IO |
 | `SimpleLLMAgent._config` | `@Volatile` + `synchronized` в setter | Читается в suspend без блокировки |
 | `SimpleLLMAgent._truncationStrategy` | `@Volatile` + `synchronized` в setter | То же |
-| `SimpleLLMAgent.profilePromptProvider` | `val` — неизменяем | Безопасен без дополнительных механизмов |
-
-### JsonMemoryStorage — почему три Mutex
-
-```kotlin
-// Три независимых слоя — нет смысла блокировать весь storage при записи в один слой
-private val workingMutex    = Mutex()
-private val longTermMutex   = Mutex()
-private val compressedMutex = Mutex()
-```
-
-Это позволяет одновременно читать LONG_TERM и записывать WORKING — без лишних блокировок.
 
 ---
 
 ## Что уходит в LLM
+
+### Стратегии 1–5 (через SimpleLLMAgent + DefaultPromptBuilder)
 
 ```
 ✅ [system] ## User Profile (от ProfileSystemPromptProvider, если facts не пусты)
@@ -225,4 +256,21 @@ private val compressedMutex = Mutex()
 ❌ compressedMessages из Facts/Memory           (только UI)
 ❌ вся история при keepConversationHistory=false (только текущий userMessage)
 ❌ Profile.rawText                              (только источник для извлечения фактов)
+```
+
+### Стратегия 6 (через TaskStateMachineAgent → innerAgent)
+
+```
+✅ [system] ## User Profile              (от profilePromptProvider innerAgent)
+✅ [system] defaultSystemPrompt
+✅ [system] ## Task State                ← инжектируется TaskStateMachineAgent.buildSystemPrompt()
+            Phase: EXECUTION
+            Current step: ...
+            Invariants: ...
+            ## Instructions: [PHASE_COMPLETE] / [PHASE: X] / [STEP: X] / [EXPECTED: X]
+✅ summary от SummaryTruncationStrategy  (innerAgent)
+✅ _context.getHistory()                 (последние N сообщений, innerAgent)
+
+❌ task_state.json напрямую             (только source of truth для восстановления)
+❌ ArchivedTask                         (только архив, не идёт в LLM)
 ```

@@ -5,6 +5,8 @@ import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
 import ru.koalexse.aichallenge.agent.context.facts.Fact
 import ru.koalexse.aichallenge.agent.context.memory.MemoryEntry
+import ru.koalexse.aichallenge.agent.task.TaskPhase
+import ru.koalexse.aichallenge.agent.task.TaskState
 import ru.koalexse.aichallenge.domain.Message
 import ru.koalexse.aichallenge.domain.SessionTokenStats
 
@@ -30,7 +32,15 @@ enum class ContextStrategyType {
      * - WORKING     — текущая задача, шаги, результаты (в LLM как system)
      * - LONG_TERM   — профиль, решения, знания (в LLM как system)
      */
-    LAYERED_MEMORY
+    LAYERED_MEMORY,
+
+    /**
+     * Task State Machine: конечный автомат задачи.
+     * Фазы: PLANNING → EXECUTION → VALIDATION → DONE
+     * Каждый ответ LLM валидируется на соответствие инвариантам фазы.
+     * Состояние персистируется между сессиями (task_state.json).
+     */
+    TASK_STATE_MACHINE
 }
 
 data class ChatUiState(
@@ -96,14 +106,36 @@ data class ChatUiState(
     val isRefreshingWorkingMemory: Boolean = false,
 
     /** true пока идёт LLM-вызов обновления LONG_TERM-памяти */
-    val isRefreshingLongTermMemory: Boolean = false
+    val isRefreshingLongTermMemory: Boolean = false,
+
+    // ==================== Task State Machine ====================
+
+    /**
+     * Текущее состояние задачи (только для TASK_STATE_MACHINE).
+     * null = нет активной задачи.
+     */
+    val taskState: TaskState? = null,
+
+    /** true пока идёт LLM-валидация ответа или переход между фазами */
+    val isValidatingTask: Boolean = false,
+
+    /** Сообщение об ошибке валидации инвариантов (null = нет ошибки) */
+    val taskValidationError: String? = null,
+
+    /** true пока идёт ручной переход к следующей фазе (AdvancePhase) */
+    val isAdvancingPhase: Boolean = false,
+
+    /** Открыт ли диалог запуска новой задачи (ввод инвариантов) */
+    val isStartTaskDialogOpen: Boolean = false
 )
 
 data class SettingsData(
     val model: String,
     val temperature: String? = null,
     val tokens: String? = null,
-    val strategy: ContextStrategyType = ContextStrategyType.SUMMARY
+    val strategy: ContextStrategyType = ContextStrategyType.SUMMARY,
+    /** Максимальное число повторных попыток при нарушении инвариантов (TASK_STATE_MACHINE) */
+    val maxRetries: String? = null
 )
 
 fun AgentConfig.toSettingsData(strategy: ContextStrategyType = ContextStrategyType.SUMMARY) =
@@ -116,3 +148,12 @@ fun AgentConfig.toSettingsData(strategy: ContextStrategyType = ContextStrategyTy
 
 fun SettingsData.isEmpty() =
     model.isEmpty() && temperature.isNullOrEmpty() && tokens.isNullOrEmpty()
+
+// ==================== Отображаемые имена фаз ====================
+
+fun TaskPhase.displayName(): String = when (this) {
+    TaskPhase.PLANNING   -> "🗺️ Planning"
+    TaskPhase.EXECUTION  -> "⚙️ Execution"
+    TaskPhase.VALIDATION -> "✅ Validation"
+    TaskPhase.DONE       -> "🏁 Done"
+}

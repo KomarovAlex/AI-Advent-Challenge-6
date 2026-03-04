@@ -20,6 +20,7 @@ import ru.koalexse.aichallenge.data.persistence.profile.Profile
  * Формат блока (если `facts` не пустой):
  * ```
  * ## User Profile
+ * This is context about the user, not the topic of conversation.
  * - факт 1
  * - факт 2
  * ```
@@ -40,6 +41,7 @@ class ActiveProfileSystemPromptProvider(
 
         return buildString {
             appendLine("## User Profile")
+            appendLine("This is context about the user, not the topic of conversation.")
             facts.forEach { appendLine("- $it") }
         }.trimEnd()
     }

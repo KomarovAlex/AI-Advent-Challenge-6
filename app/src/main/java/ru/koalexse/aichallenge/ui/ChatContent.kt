@@ -10,9 +10,12 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Work
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -21,6 +24,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
@@ -33,9 +37,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import ru.koalexse.aichallenge.R
+import ru.koalexse.aichallenge.agent.task.TaskPhase
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 import ru.koalexse.aichallenge.ui.state.ContextStrategyType
 import ru.koalexse.aichallenge.ui.state.SettingsData
+import ru.koalexse.aichallenge.ui.state.displayName
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -47,6 +53,12 @@ fun ChatContent(
     val uiState by remember { derivedStateOf { state.value } }
     var overflowExpanded by remember { mutableStateOf(false) }
 
+    // Локальные снимки task-state для избежания проблем со smart cast делегированного свойства
+    val taskState = uiState.taskState
+    val hasActiveTask = taskState?.isActive == true
+    val taskPhase = taskState?.phase
+    val isTaskDone = taskPhase == TaskPhase.DONE
+
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
@@ -54,14 +66,22 @@ fun ChatContent(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text(uiState.settingsData.model) },
+                title = {
+                    // Для TASK_STATE_MACHINE — показываем фазу в заголовке
+                    if (uiState.activeStrategy == ContextStrategyType.TASK_STATE_MACHINE &&
+                        hasActiveTask && taskPhase != null
+                    ) {
+                        Text("${taskPhase.displayName()} · ${uiState.settingsData.model}")
+                    } else {
+                        Text(uiState.settingsData.model)
+                    }
+                },
                 actions = {
                     // ── Strategy-specific primary actions (≤ 2 icon buttons) ──────────
 
                     when (uiState.activeStrategy) {
 
                         ContextStrategyType.STICKY_FACTS -> {
-                            // 1 strategy button → show it + Profiles as the 2nd icon
                             IconButton(
                                 onClick = { handleIntent(ChatIntent.RefreshFacts) },
                                 enabled = !uiState.isLoading && !uiState.isRefreshingFacts
@@ -84,7 +104,6 @@ fun ChatContent(
                         }
 
                         ContextStrategyType.BRANCHING -> {
-                            // 2 strategy buttons fill both slots
                             IconButton(
                                 onClick = { handleIntent(ChatIntent.CreateCheckpoint) },
                                 enabled = !uiState.isLoading &&
@@ -109,7 +128,6 @@ fun ChatContent(
                         }
 
                         ContextStrategyType.LAYERED_MEMORY -> {
-                            // 2 strategy buttons fill both slots
                             IconButton(
                                 onClick = { handleIntent(ChatIntent.RefreshWorkingMemory) },
                                 enabled = !uiState.isLoading && !uiState.isRefreshingWorkingMemory
@@ -131,8 +149,42 @@ fun ChatContent(
                             }
                         }
 
+                        ContextStrategyType.TASK_STATE_MACHINE -> {
+                            // Кнопка «▶ Новая задача» или «→ Следующая фаза»
+                            if (!hasActiveTask || isTaskDone) {
+                                IconButton(
+                                    onClick = { handleIntent(ChatIntent.OpenStartTaskDialog) },
+                                    enabled = !uiState.isLoading
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.PlayArrow,
+                                        contentDescription = "Start new task"
+                                    )
+                                }
+                            } else {
+                                IconButton(
+                                    onClick = { handleIntent(ChatIntent.AdvancePhase) },
+                                    enabled = !uiState.isLoading && !uiState.isAdvancingPhase
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Refresh,
+                                        contentDescription = "Advance to next phase"
+                                    )
+                                }
+                            }
+
+                            IconButton(
+                                onClick = onNavigateToProfiles,
+                                enabled = !uiState.isLoading
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Person,
+                                    contentDescription = stringResource(R.string.toolbar_profiles)
+                                )
+                            }
+                        }
+
                         else -> {
-                            // No strategy-specific buttons → Profiles + Settings as the 2 icons
                             IconButton(
                                 onClick = onNavigateToProfiles,
                                 enabled = !uiState.isLoading
@@ -167,7 +219,6 @@ fun ChatContent(
                         expanded = overflowExpanded,
                         onDismissRequest = { overflowExpanded = false }
                     ) {
-                        // Strategy-specific items that didn't get their own icon button
                         when (uiState.activeStrategy) {
 
                             ContextStrategyType.STICKY_FACTS -> {
@@ -176,7 +227,6 @@ fun ChatContent(
 
                             ContextStrategyType.BRANCHING,
                             ContextStrategyType.LAYERED_MEMORY -> {
-                                // Both strategy slots taken; Profiles goes in the overflow
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.toolbar_profiles)) },
                                     leadingIcon = {
@@ -190,12 +240,25 @@ fun ChatContent(
                                 )
                             }
 
-                            else -> {
-                                // Profiles + Settings already shown as icons; nothing extra
+                            ContextStrategyType.TASK_STATE_MACHINE -> {
+                                // Reset task (если есть активная задача)
+                                if (hasActiveTask) {
+                                    DropdownMenuItem(
+                                        text = { Text("Reset task") },
+                                        leadingIcon = {
+                                            Icon(Icons.Default.CleaningServices, contentDescription = null)
+                                        },
+                                        onClick = {
+                                            overflowExpanded = false
+                                            handleIntent(ChatIntent.ResetTask)
+                                        },
+                                        enabled = !uiState.isLoading
+                                    )
+                                }
                             }
-                        }
 
-                        // ── Persistent actions always in overflow ─────────────────────
+                            else -> { /* Profiles + Settings already shown as icons */ }
+                        }
 
                         // Settings — only when it wasn't shown as an icon
                         if (uiState.activeStrategy != ContextStrategyType.SLIDING_WINDOW &&
@@ -245,6 +308,31 @@ fun ChatContent(
             activeBranchId = uiState.activeBranchId,
             onDismiss = { handleIntent(ChatIntent.OpenBranchDialog) },
             onSwitch = { handleIntent(ChatIntent.SwitchBranch(it)) }
+        )
+    }
+
+    // ── Start Task dialog (Task State Machine) ────────────────────────────
+    if (uiState.isStartTaskDialogOpen) {
+        StartTaskDialog(
+            onDismiss = { handleIntent(ChatIntent.CloseStartTaskDialog) },
+            onConfirm = { phaseInvariants ->
+                handleIntent(ChatIntent.StartTask(phaseInvariants))
+            }
+        )
+    }
+
+    // ── Task validation / advance error dialog ────────────────────────────
+    val taskError = uiState.taskValidationError
+    if (taskError != null) {
+        AlertDialog(
+            onDismissRequest = { handleIntent(ChatIntent.ClearTaskError) },
+            title = { Text("⚠️ Phase advance blocked") },
+            text = { Text(taskError) },
+            confirmButton = {
+                TextButton(onClick = { handleIntent(ChatIntent.ClearTaskError) }) {
+                    Text("OK")
+                }
+            }
         )
     }
 }
