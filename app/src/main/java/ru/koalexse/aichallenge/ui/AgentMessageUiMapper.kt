@@ -5,8 +5,10 @@ import ru.koalexse.aichallenge.agent.Role
 import ru.koalexse.aichallenge.agent.context.memory.MemoryEntry
 import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
 import ru.koalexse.aichallenge.agent.isUser
+import ru.koalexse.aichallenge.agent.task.TaskState
 import ru.koalexse.aichallenge.domain.Message
 import ru.koalexse.aichallenge.domain.TokenStats
+import ru.koalexse.aichallenge.ui.state.displayName
 
 /**
  * Конвертеры агентных моделей в UI-модели.
@@ -114,6 +116,57 @@ fun List<MemoryEntry>.toLongTermMemoryUiMessage(): Message? {
 }
 
 /**
+ * Конвертирует [TaskState] в специальный UI-Message для отображения в [TaskStateBubble].
+ *
+ * Bubble отображается только в Planning mode когда задача активна.
+ * Содержит:
+ * - текущую фазу + шаг + expectedAction
+ * - итоги завершённых фаз ([TaskState.phaseOutputs])
+ * - инварианты текущей фазы
+ *
+ * Текст специально форматирован для парсинга в [TaskStateBubble] —
+ * bubble не использует raw text напрямую, он читает поля из [TaskState].
+ * Message здесь — только транспорт для id и маршрутизации в [MessageList].
+ *
+ * Возвращает `null` если задача неактивна.
+ */
+fun TaskState.toTaskStateBubbleMessage(): Message? {
+    if (!isActive) return null
+
+    val sb = StringBuilder()
+
+    // Текущая фаза
+    sb.appendLine("${phase.displayName()} · ${currentStep}")
+    if (expectedAction.isNotBlank()) {
+        sb.appendLine("Expected: $expectedAction")
+    }
+
+    // Инварианты текущей фазы
+    val invariants = currentInvariants
+    if (invariants.isNotEmpty()) {
+        sb.appendLine()
+        sb.appendLine("Invariants:")
+        invariants.forEach { sb.appendLine("• $it") }
+    }
+
+    // Итоги завершённых фаз
+    if (phaseOutputs.isNotEmpty()) {
+        sb.appendLine()
+        sb.appendLine("Completed phases:")
+        phaseOutputs.forEach { po ->
+            sb.appendLine("${po.phase.displayName()}: ${po.output.take(120).trimEnd()}…")
+        }
+    }
+
+    return Message(
+        id = TASK_STATE_BUBBLE_ID,
+        isUser = false,
+        text = sb.toString().trimEnd(),
+        isCompressed = true
+    )
+}
+
+/**
  * Конвертирует активную историю агента в UI-сообщения.
  * Последнему ответу ассистента проставляются [lastMessageStats] и [lastMessageDuration].
  */
@@ -131,3 +184,6 @@ fun List<AgentMessage>.toActiveUiMessages(
         )
     }
 }
+
+/** Id bubble-сообщения с состоянием задачи. Используется для маршрутизации в [MessageList]. */
+const val TASK_STATE_BUBBLE_ID = "task_state_bubble"

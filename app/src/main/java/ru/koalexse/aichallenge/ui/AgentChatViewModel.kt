@@ -200,9 +200,16 @@ class AgentChatViewModel(
             listOfNotNull(internal.workingMemory.toWorkingMemoryUiMessage())
         else emptyList()
 
+        // Planning mode — Task State bubble: только если режим активен и задача существует
+        val taskStateMessages = if (internal.isPlanningMode)
+            listOfNotNull(internal.taskState?.toTaskStateBubbleMessage())
+        else
+            emptyList()
+
         // Порядок сверху вниз в ленте (список перевёрнут в LazyColumn с reverseLayout):
-        // long-term → working → memory-compressed → facts-compressed → summaries-compressed → history → streaming
+        // task-state → long-term → working → memory-compressed → facts-compressed → summaries-compressed → history → streaming
         val allMessages =
+            taskStateMessages +
             longTermMemoryMessages +
             workingMemoryMessages +
             memoryCompressedMessages +
@@ -733,7 +740,7 @@ class AgentChatViewModel(
 
     /**
      * Ручной переход к следующей фазе с LLM-валидацией готовности.
-     * Кнопка «→ Next Phase» в тулбаре Planning mode.
+     * Вызывается из [TaskStateBubble] (кнопка «→ Next phase»).
      */
     private fun advancePhase() {
         val tsm = taskStateMachineAgent ?: return
@@ -777,6 +784,7 @@ class AgentChatViewModel(
 
     /**
      * Сбрасывает текущую задачу (архивирует) и возвращает в исходное состояние.
+     * Вызывается из [TaskStateBubble] (кнопка «✕ Reset»).
      */
     private fun resetTask() {
         val tsm = taskStateMachineAgent ?: return

@@ -53,12 +53,10 @@ fun ChatContent(
     val uiState by remember { derivedStateOf { state.value } }
     var overflowExpanded by remember { mutableStateOf(false) }
 
-    // Локальные снимки task-state для избежания проблем со smart cast делегированного свойства
     val isPlanningMode = uiState.isPlanningMode
     val taskState = uiState.taskState
     val hasActiveTask = taskState?.isActive == true
     val taskPhase = taskState?.phase
-    val isTaskDone = taskPhase == TaskPhase.DONE
 
     Scaffold(
         modifier = Modifier
@@ -76,36 +74,21 @@ fun ChatContent(
                     }
                 },
                 actions = {
-                    // ── Planning mode actions ─────────────────────────────────────────
-                    // Кнопки управления задачей — только в Planning mode
-                    if (isPlanningMode) {
-                        if (!hasActiveTask || isTaskDone) {
-                            // Кнопка «▶ Новая задача»
-                            IconButton(
-                                onClick = { handleIntent(ChatIntent.OpenStartTaskDialog) },
-                                enabled = !uiState.isLoading
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.PlayArrow,
-                                    contentDescription = "Start new task"
-                                )
-                            }
-                        } else {
-                            // Кнопка «→ Следующая фаза»
-                            IconButton(
-                                onClick = { handleIntent(ChatIntent.AdvancePhase) },
-                                enabled = !uiState.isLoading && !uiState.isAdvancingPhase
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Refresh,
-                                    contentDescription = "Advance to next phase"
-                                )
-                            }
+                    // ── Planning mode: кнопка «▶ Новая задача» ────────────────────────
+                    // Кнопки AdvancePhase и ResetTask перенесены в TaskStateBubble
+                    if (isPlanningMode && (!hasActiveTask || taskPhase == TaskPhase.DONE)) {
+                        IconButton(
+                            onClick = { handleIntent(ChatIntent.OpenStartTaskDialog) },
+                            enabled = !uiState.isLoading
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Start new task"
+                            )
                         }
                     }
 
                     // ── Strategy-specific primary actions ─────────────────────────────
-                    // Кнопки стратегии контекста независимы от Planning mode
                     when (uiState.activeStrategy) {
 
                         ContextStrategyType.STICKY_FACTS -> {
@@ -211,21 +194,6 @@ fun ChatContent(
                         expanded = overflowExpanded,
                         onDismissRequest = { overflowExpanded = false }
                     ) {
-                        // Planning mode: Reset task в overflow
-                        if (isPlanningMode && hasActiveTask) {
-                            DropdownMenuItem(
-                                text = { Text("Reset task") },
-                                leadingIcon = {
-                                    Icon(Icons.Default.CleaningServices, contentDescription = null)
-                                },
-                                onClick = {
-                                    overflowExpanded = false
-                                    handleIntent(ChatIntent.ResetTask)
-                                },
-                                enabled = !uiState.isLoading
-                            )
-                        }
-
                         when (uiState.activeStrategy) {
                             ContextStrategyType.STICKY_FACTS -> {
                                 // Profiles is already an icon; Settings + Clear go here
