@@ -11,7 +11,6 @@ import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
 import ru.koalexse.aichallenge.agent.context.strategy.BranchingStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
 import ru.koalexse.aichallenge.agent.profile.ProfileSystemPromptProvider
-import ru.koalexse.aichallenge.domain.ApiMessage
 import ru.koalexse.aichallenge.domain.ChatRequest
 import ru.koalexse.aichallenge.domain.StatsStreamResult
 import ru.koalexse.aichallenge.domain.TokenStats
@@ -25,7 +24,12 @@ import java.net.SocketTimeoutException
  * - Инкапсулирует историю — снаружи только read-only доступ через [conversationHistory]
  * - Поддерживает стратегии управления контекстом через [ContextTruncationStrategy]
  * - Поддерживает персонализацию через [ProfileSystemPromptProvider]
+ * - Делегирует формирование сообщений [PromptBuilder]
  * - Не зависит от Android фреймворка
+ *
+ * Реализует [ConfigurableAgent] — мутирующие операции ([updateConfig],
+ * [updateTruncationStrategy]) доступны только через этот интерфейс,
+ * а не через базовый [Agent]. Потребители без права на мутацию работают с [Agent].
  *
  * ### Доступ к возможностям стратегий
  * Стратегия-специфичные операции (summaries, facts, branches) доступны
@@ -38,17 +42,8 @@ import java.net.SocketTimeoutException
  *
  * ### Персонализация через профиль
  * При каждом запросе [profilePromptProvider] динамически читает активный профиль
- * и добавляет его факты первым блоком в system-промпт:
- * ```
- * ## User Profile
- * - факт 1
- * - факт 2
- *
- * <defaultSystemPrompt>
- *
- * ## Summary / Facts   ← от стратегии
- * ```
- * Если провайдер не задан или у профиля нет фактов — блок не добавляется.
+ * и добавляет его факты первым блоком в system-промпт. Логика сборки промпта
+ * инкапсулирована в [PromptBuilder] (по умолчанию — [DefaultPromptBuilder]).
  *
  * ### Потокобезопасность
  * - [_config] и [_truncationStrategy] помечены `@Volatile` — гарантирует видимость
@@ -65,14 +60,17 @@ import java.net.SocketTimeoutException
  * @param agentContext контекст для управления историей (по умолчанию [SimpleAgentContext])
  * @param truncationStrategy стратегия обрезки контекста (null = без обрезки)
  * @param profilePromptProvider провайдер блока профиля для system-промпта (null = без профиля)
+ * @param promptBuilder построитель списка сообщений для LLM-запроса
+ *   (null = создаётся [DefaultPromptBuilder] с зависимостями от этого агента)
  */
 class SimpleLLMAgent(
     private val api: StatsLLMApi,
     initialConfig: AgentConfig,
     agentContext: AgentContext = SimpleAgentContext(),
     truncationStrategy: ContextTruncationStrategy? = null,
-    private val profilePromptProvider: ProfileSystemPromptProvider? = null
-) : Agent {
+    profilePromptProvider: ProfileSystemPromptProvider? = null,
+    promptBuilder: PromptBuilder? = null
+) : ConfigurableAgent {
 
     @Volatile
     private var _config: AgentConfig = initialConfig
@@ -81,6 +79,14 @@ class SimpleLLMAgent(
 
     @Volatile
     private var _truncationStrategy: ContextTruncationStrategy? = truncationStrategy
+
+    // null в параметре → создаём DefaultPromptBuilder здесь, в теле класса,
+    // чтобы лямбды корректно захватывали уже инициализированные поля _truncationStrategy и _context
+    private val _promptBuilder: PromptBuilder = promptBuilder ?: DefaultPromptBuilder(
+        profilePromptProvider = profilePromptProvider,
+        truncationStrategyProvider = { _truncationStrategy },
+        historyProvider = { _context.getHistory() }
+    )
 
     override val config: AgentConfig
         get() = _config
@@ -334,78 +340,19 @@ class SimpleLLMAgent(
     /**
      * Собирает [ChatRequest] из [AgentRequest] и снимка конфигурации.
      *
+     * Делегирует формирование списка сообщений в [_promptBuilder].
      * Принимает [config] явно — не читает [_config] напрямую,
      * чтобы не создавать дополнительных volatile-точек вне snapshot.
      */
     private suspend fun buildChatRequest(request: AgentRequest, config: AgentConfig): ChatRequest {
         return ChatRequest(
-            messages = buildMessageList(request, config),
+            messages = _promptBuilder.buildMessages(request, config),
             model = request.model,
             temperature = request.temperature,
             max_tokens = request.maxTokens,
             // stopSequences из request имеют приоритет; fallback — из снимка конфига
             stop = request.stopSequences ?: config.defaultStopSequences
         )
-    }
-
-    /**
-     * Формирует список сообщений для API.
-     *
-     * Принимает [config] явно — не читает [_config] напрямую.
-     *
-     * Структура system-промпта (все блоки объединяются через "\n\n"):
-     * 1а. Блок профиля пользователя от [profilePromptProvider] (если задан и facts не пусты)
-     * 1б. System prompt из request или config.defaultSystemPrompt (если не пустой)
-     * 1в. Дополнительные системные сообщения от стратегии (summary / facts)
-     *
-     * Если все блоки пусты — system-сообщение не добавляется.
-     *
-     * Далее:
-     * 2а. keepConversationHistory=true  → _context.getHistory() (уже включает userMessage)
-     * 2б. keepConversationHistory=false → только текущий userMessage
-     */
-    private suspend fun buildMessageList(
-        request: AgentRequest,
-        config: AgentConfig
-    ): List<ApiMessage> {
-        val messages = mutableListOf<ApiMessage>()
-        val systemPrompts = mutableListOf<String>()
-
-        // 1а. Блок профиля — первый, до системного промпта и стратегии
-        profilePromptProvider?.getProfileBlock()
-            ?.let { systemPrompts.add(it) }
-
-        // 1б. Системный промпт: из запроса или из снимка конфига
-        val systemPrompt = request.systemPrompt ?: config.defaultSystemPrompt
-        if (!systemPrompt.isNullOrBlank()) {
-            systemPrompts.add(systemPrompt)
-        }
-
-        // 1в. Дополнительные системные сообщения от стратегии (summary, facts и т.п.)
-        _truncationStrategy?.getAdditionalSystemMessages()
-            ?.map { it.content }
-            ?.filter { it.isNotBlank() }
-            ?.let { systemPrompts.addAll(it) }
-
-        // 2. Добавляем объединённый system-промпт, если есть что добавлять
-        if (systemPrompts.isNotEmpty()) {
-            // Заголовки уже есть внутри каждого блока
-            val combinedSystemPrompt = systemPrompts.joinToString("\n\n")
-            messages.add(ApiMessage(role = "system", content = combinedSystemPrompt))
-        }
-
-        // 3. История или одиночный запрос
-        if (config.keepConversationHistory) {
-            // Исключаем старые system-сообщения из истории,
-            // чтобы избежать дублирования инструкций
-            _context.getHistory()
-                .filter { it.role != Role.SYSTEM }
-                .forEach { msg -> messages.add(msg.toApiMessage()) }
-        } else {
-            messages.add(ApiMessage(role = "user", content = request.userMessage))
-        }
-
-        return messages
     }
 
     private fun wrapException(e: Throwable): AgentException = when (e) {
@@ -415,14 +362,5 @@ class SimpleLLMAgent(
             e
         )
         else -> AgentException.ApiError(message = e.message ?: "Unknown error", cause = e)
-    }
-
-    private fun AgentMessage.toApiMessage(): ApiMessage {
-        val roleString = when (role) {
-            Role.USER -> "user"
-            Role.ASSISTANT -> "assistant"
-            Role.SYSTEM -> "system"
-        }
-        return ApiMessage(role = roleString, content = content)
     }
 }

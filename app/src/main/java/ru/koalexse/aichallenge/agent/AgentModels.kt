@@ -1,5 +1,6 @@
 package ru.koalexse.aichallenge.agent
 
+import ru.koalexse.aichallenge.domain.ApiMessage
 import ru.koalexse.aichallenge.domain.TokenStats
 
 /**
@@ -23,6 +24,20 @@ data class AgentMessage(
 
 val AgentMessage.isUser: Boolean
     get() = role == Role.USER
+
+/**
+ * Конвертирует [AgentMessage] в [ApiMessage] для отправки в LLM API.
+ *
+ * Используется в [DefaultPromptBuilder] при формировании списка сообщений запроса.
+ */
+fun AgentMessage.toApiMessage(): ApiMessage {
+    val roleString = when (role) {
+        Role.USER -> "user"
+        Role.ASSISTANT -> "assistant"
+        Role.SYSTEM -> "system"
+    }
+    return ApiMessage(role = roleString, content = content)
+}
 
 /**
  * Запрос к агенту

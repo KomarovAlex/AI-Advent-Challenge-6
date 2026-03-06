@@ -8,7 +8,7 @@
 |---|---|
 | Структуру файлов проекта | [PROJECT_STRUCTURE.md](./PROJECT_STRUCTURE.md) |
 | Архитектуру и поток данных | [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) |
-| Agent, AgentRequest, buildMessageList | [docs/AGENT.md](./docs/AGENT.md) |
+| Agent, ConfigurableAgent, buildMessageList | [docs/AGENT.md](./docs/AGENT.md) |
 | Компрессию истории (summary) | [docs/COMPRESSION.md](./docs/COMPRESSION.md) |
 | API, persistence, модели | [docs/DATA_LAYER.md](./docs/DATA_LAYER.md) |
 | ViewModel, MVI, UI | [docs/UI_LAYER.md](./docs/UI_LAYER.md) |
@@ -44,6 +44,7 @@
 - **MVI** в UI (Intent → ViewModel → State)
 - **Strategy** для обрезки контекста
 - **Decorator** для статистики API (`StatsTrackingLLMApi`)
+- **ISP**: `Agent` (read-only) → `ConfigurableAgent` (мутация) → `SimpleLLMAgent` (реализация)
 
 ---
 
@@ -56,3 +57,5 @@
 - Не блокировать main thread — IO на `Dispatchers.IO`
 - Не использовать `runBlocking` в `suspend`-функциях
 - Не включать `originalMessages` в LLM-запрос
+- Не вызывать `updateConfig` / `updateTruncationStrategy` через `Agent` — только через `ConfigurableAgent`
+- Не делать unsafe-cast `agent as ConfigurableAgent` — фабрики уже возвращают правильный тип

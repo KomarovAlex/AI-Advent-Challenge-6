@@ -3,10 +3,11 @@ package ru.koalexse.aichallenge.agent
 import ru.koalexse.aichallenge.agent.context.strategy.ContextTruncationStrategy
 
 /**
- * Фабрика для создания агентов
+ * Фабрика для создания агентов.
  *
- * Инкапсулирует логику создания и конфигурирования агентов.
- * Может использоваться как простая замена DI в небольших проектах.
+ * Возвращает [ConfigurableAgent] — конкретный контракт [SimpleLLMAgent],
+ * который поддерживает смену конфига и стратегии в рантайме.
+ * Потребители без права на мутацию могут использовать результат как [Agent].
  */
 object AgentFactory {
 
@@ -22,7 +23,7 @@ object AgentFactory {
         statsApi: StatsLLMApi,
         config: AgentConfig,
         truncationStrategy: ContextTruncationStrategy? = null
-    ): Agent {
+    ): ConfigurableAgent {
         return SimpleLLMAgent(
             api = statsApi,
             initialConfig = config,
@@ -32,7 +33,10 @@ object AgentFactory {
 }
 
 /**
- * Builder для более гибкого создания агента
+ * Builder для более гибкого создания агента.
+ *
+ * Возвращает [ConfigurableAgent] — позволяет вызывающему коду
+ * при необходимости обновлять конфиг и стратегию без unsafe-cast.
  */
 class AgentBuilder {
     private var api: StatsLLMApi? = null
@@ -100,7 +104,7 @@ class AgentBuilder {
         return this
     }
 
-    fun build(): Agent {
+    fun build(): ConfigurableAgent {
         val statsApi = api ?: throw IllegalStateException("StatsLLMApi must be provided via withApi()")
 
         val config = AgentConfig(
@@ -123,7 +127,10 @@ class AgentBuilder {
 }
 
 /**
- * DSL-функция для создания агента
+ * DSL-функция для создания агента.
+ *
+ * Возвращает [ConfigurableAgent] — позволяет обновлять конфиг
+ * и стратегию без unsafe-cast после создания.
  *
  * ```kotlin
  * val agent = buildAgent {
@@ -135,6 +142,6 @@ class AgentBuilder {
  * }
  * ```
  */
-fun buildAgent(block: AgentBuilder.() -> Unit): Agent {
+fun buildAgent(block: AgentBuilder.() -> Unit): ConfigurableAgent {
     return AgentBuilder().apply(block).build()
 }

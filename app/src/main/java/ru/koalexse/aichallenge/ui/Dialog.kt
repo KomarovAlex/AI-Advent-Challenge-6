@@ -2,6 +2,7 @@ package ru.koalexse.aichallenge.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenuItem
@@ -10,6 +11,7 @@ import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -17,12 +19,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import ru.koalexse.aichallenge.R
 import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
+import ru.koalexse.aichallenge.agent.task.PhaseInvariants
+import ru.koalexse.aichallenge.agent.task.TaskPhase
 import ru.koalexse.aichallenge.ui.state.ContextStrategyType
 import ru.koalexse.aichallenge.ui.state.SettingsData
 import ru.koalexse.aichallenge.ui.state.isEmpty
@@ -80,7 +85,24 @@ fun MultiFieldInputDialog(
                     }
                 }
 
+                // ── Planning mode ─────────────────────────────────────────────
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(stringResource(R.string.settings_planning_mode_label))
+                    Switch(
+                        checked = settingsData.isPlanningMode,
+                        onCheckedChange = {
+                            settingsData = settingsData.copy(isPlanningMode = it)
+                        }
+                    )
+                }
+
                 // ── Выбор стратегии ───────────────────────────────────────────
+                // TASK_STATE_MACHINE намеренно исключён: это не стратегия контекста,
+                // а отдельный режим работы. Переключается чекбоксом «Planning mode» выше.
                 ExposedDropdownMenuBox(
                     expanded = strategyDropdownExpanded,
                     onExpandedChange = { strategyDropdownExpanded = it }
@@ -200,14 +222,117 @@ fun BranchSwitchDialog(
     )
 }
 
+/**
+ * Диалог запуска новой задачи (Planning mode / Task State Machine).
+ *
+ * Пользователь вводит инварианты для каждой фазы в отдельные поля.
+ * Формат ввода: одно правило на строку. Пустые поля — нет инвариантов для фазы.
+ *
+ * @param onDismiss  закрытие без действия
+ * @param onConfirm  пользователь подтвердил запуск задачи с инвариантами
+ */
+@Composable
+fun StartTaskDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (List<PhaseInvariants>) -> Unit
+) {
+    var planningInvariants by remember { mutableStateOf("") }
+    var executionInvariants by remember { mutableStateOf("") }
+    var validationInvariants by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("🚀 Start New Task") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Enter invariants for each phase (one rule per line, or leave empty):")
+
+                OutlinedTextField(
+                    value = planningInvariants,
+                    onValueChange = { planningInvariants = it },
+                    label = { Text("🗺️ Planning invariants") },
+                    minLines = 2,
+                    maxLines = 4,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = executionInvariants,
+                    onValueChange = { executionInvariants = it },
+                    label = { Text("⚙️ Execution invariants") },
+                    minLines = 2,
+                    maxLines = 4,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = validationInvariants,
+                    onValueChange = { validationInvariants = it },
+                    label = { Text("✅ Validation invariants") },
+                    minLines = 2,
+                    maxLines = 4,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val invariants = buildPhaseInvariants(
+                        planningInvariants,
+                        executionInvariants,
+                        validationInvariants
+                    )
+                    onConfirm(invariants)
+                }
+            ) {
+                Text("Start Task")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(stringResource(R.string.settings_cancel))
+            }
+        }
+    )
+}
+
 // ==================== Helpers ====================
 
+/**
+ * Парсит строки инвариантов из UI в список [PhaseInvariants].
+ * Пустые строки и фазы без правил игнорируются.
+ */
+private fun buildPhaseInvariants(
+    planning: String,
+    execution: String,
+    validation: String
+): List<PhaseInvariants> {
+    val result = mutableListOf<PhaseInvariants>()
+
+    fun parseRules(text: String): List<String> =
+        text.lines()
+            .map { it.trimStart('-', '*', '•', ' ').trim() }
+            .filter { it.isNotEmpty() }
+
+    val planningRules = parseRules(planning)
+    if (planningRules.isNotEmpty()) result.add(PhaseInvariants(TaskPhase.PLANNING, planningRules))
+
+    val executionRules = parseRules(execution)
+    if (executionRules.isNotEmpty()) result.add(PhaseInvariants(TaskPhase.EXECUTION, executionRules))
+
+    val validationRules = parseRules(validation)
+    if (validationRules.isNotEmpty()) result.add(PhaseInvariants(TaskPhase.VALIDATION, validationRules))
+
+    return result
+}
+
 fun ContextStrategyType.displayName(): String = when (this) {
-    ContextStrategyType.SLIDING_WINDOW  -> "Sliding Window"
-    ContextStrategyType.STICKY_FACTS    -> "Sticky Facts"
-    ContextStrategyType.BRANCHING       -> "Branching"
-    ContextStrategyType.SUMMARY         -> "Summary (LLM)"
-    ContextStrategyType.LAYERED_MEMORY  -> "Layered Memory 🧠"
+    ContextStrategyType.SLIDING_WINDOW -> "Sliding Window"
+    ContextStrategyType.STICKY_FACTS   -> "Sticky Facts"
+    ContextStrategyType.BRANCHING      -> "Branching"
+    ContextStrategyType.SUMMARY        -> "Summary (LLM)"
+    ContextStrategyType.LAYERED_MEMORY -> "Layered Memory 🧠"
 }
 
 // ==================== Previews ====================
@@ -215,6 +340,15 @@ fun ContextStrategyType.displayName(): String = when (this) {
 @[Composable Preview]
 fun MultiFieldInputDialogPreview() {
     MultiFieldInputDialog(
+        availableModels = listOf("deepseek-v3.2"),
+        onDismiss = {}
+    ) {}
+}
+
+@[Composable Preview]
+fun MultiFieldInputDialogPlanningModePreview() {
+    MultiFieldInputDialog(
+        settings = SettingsData(model = "deepseek-v3.2", isPlanningMode = true),
         availableModels = listOf("deepseek-v3.2"),
         onDismiss = {}
     ) {}
@@ -230,5 +364,13 @@ fun BranchSwitchDialogPreview() {
         activeBranchId = "1",
         onDismiss = {},
         onSwitch = {}
+    )
+}
+
+@[Composable Preview]
+fun StartTaskDialogPreview() {
+    StartTaskDialog(
+        onDismiss = {},
+        onConfirm = {}
     )
 }

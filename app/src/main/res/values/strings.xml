@@ -12,6 +12,7 @@
     <!-- Settings dialog -->
     <string name="settings_title">Settings</string>
     <string name="settings_model_label">model</string>
+    <string name="settings_planning_mode_label">Planning mode 🤖</string>
     <string name="settings_strategy_label">context strategy</string>
     <string name="settings_temperature_label">temperature</string>
     <string name="settings_max_tokens_label">max tokens</string>

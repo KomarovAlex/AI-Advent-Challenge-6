@@ -10,9 +10,12 @@ import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Work
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -21,6 +24,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
@@ -33,9 +37,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import ru.koalexse.aichallenge.R
+import ru.koalexse.aichallenge.agent.task.TaskPhase
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 import ru.koalexse.aichallenge.ui.state.ContextStrategyType
 import ru.koalexse.aichallenge.ui.state.SettingsData
+import ru.koalexse.aichallenge.ui.state.displayName
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -47,6 +53,11 @@ fun ChatContent(
     val uiState by remember { derivedStateOf { state.value } }
     var overflowExpanded by remember { mutableStateOf(false) }
 
+    val isPlanningMode = uiState.isPlanningMode
+    val taskState = uiState.taskState
+    val hasActiveTask = taskState?.isActive == true
+    val taskPhase = taskState?.phase
+
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
@@ -54,14 +65,33 @@ fun ChatContent(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text(uiState.settingsData.model) },
+                title = {
+                    // В Planning mode — показываем фазу в заголовке если задача активна
+                    if (isPlanningMode && hasActiveTask && taskPhase != null) {
+                        Text("${taskPhase.displayName()} · ${uiState.settingsData.model}")
+                    } else {
+                        Text(uiState.settingsData.model)
+                    }
+                },
                 actions = {
-                    // ── Strategy-specific primary actions (≤ 2 icon buttons) ──────────
+                    // ── Planning mode: кнопка «▶ Новая задача» ────────────────────────
+                    // Кнопки AdvancePhase и ResetTask перенесены в TaskStateBubble
+                    if (isPlanningMode && (!hasActiveTask || taskPhase == TaskPhase.DONE)) {
+                        IconButton(
+                            onClick = { handleIntent(ChatIntent.OpenStartTaskDialog) },
+                            enabled = !uiState.isLoading
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Start new task"
+                            )
+                        }
+                    }
 
+                    // ── Strategy-specific primary actions ─────────────────────────────
                     when (uiState.activeStrategy) {
 
                         ContextStrategyType.STICKY_FACTS -> {
-                            // 1 strategy button → show it + Profiles as the 2nd icon
                             IconButton(
                                 onClick = { handleIntent(ChatIntent.RefreshFacts) },
                                 enabled = !uiState.isLoading && !uiState.isRefreshingFacts
@@ -84,7 +114,6 @@ fun ChatContent(
                         }
 
                         ContextStrategyType.BRANCHING -> {
-                            // 2 strategy buttons fill both slots
                             IconButton(
                                 onClick = { handleIntent(ChatIntent.CreateCheckpoint) },
                                 enabled = !uiState.isLoading &&
@@ -109,7 +138,6 @@ fun ChatContent(
                         }
 
                         ContextStrategyType.LAYERED_MEMORY -> {
-                            // 2 strategy buttons fill both slots
                             IconButton(
                                 onClick = { handleIntent(ChatIntent.RefreshWorkingMemory) },
                                 enabled = !uiState.isLoading && !uiState.isRefreshingWorkingMemory
@@ -132,7 +160,6 @@ fun ChatContent(
                         }
 
                         else -> {
-                            // No strategy-specific buttons → Profiles + Settings as the 2 icons
                             IconButton(
                                 onClick = onNavigateToProfiles,
                                 enabled = !uiState.isLoading
@@ -167,16 +194,13 @@ fun ChatContent(
                         expanded = overflowExpanded,
                         onDismissRequest = { overflowExpanded = false }
                     ) {
-                        // Strategy-specific items that didn't get their own icon button
                         when (uiState.activeStrategy) {
-
                             ContextStrategyType.STICKY_FACTS -> {
                                 // Profiles is already an icon; Settings + Clear go here
                             }
 
                             ContextStrategyType.BRANCHING,
                             ContextStrategyType.LAYERED_MEMORY -> {
-                                // Both strategy slots taken; Profiles goes in the overflow
                                 DropdownMenuItem(
                                     text = { Text(stringResource(R.string.toolbar_profiles)) },
                                     leadingIcon = {
@@ -190,12 +214,8 @@ fun ChatContent(
                                 )
                             }
 
-                            else -> {
-                                // Profiles + Settings already shown as icons; nothing extra
-                            }
+                            else -> { /* Profiles + Settings already shown as icons */ }
                         }
-
-                        // ── Persistent actions always in overflow ─────────────────────
 
                         // Settings — only when it wasn't shown as an icon
                         if (uiState.activeStrategy != ContextStrategyType.SLIDING_WINDOW &&
@@ -247,12 +267,55 @@ fun ChatContent(
             onSwitch = { handleIntent(ChatIntent.SwitchBranch(it)) }
         )
     }
+
+    // ── Start Task dialog (Planning mode) ─────────────────────────────────
+    if (uiState.isStartTaskDialogOpen) {
+        StartTaskDialog(
+            onDismiss = { handleIntent(ChatIntent.CloseStartTaskDialog) },
+            onConfirm = { phaseInvariants ->
+                handleIntent(ChatIntent.StartTask(phaseInvariants))
+            }
+        )
+    }
+
+    // ── Task validation / advance error dialog ────────────────────────────
+    val taskError = uiState.taskValidationError
+    if (taskError != null) {
+        AlertDialog(
+            onDismissRequest = { handleIntent(ChatIntent.ClearTaskError) },
+            title = { Text("⚠️ Phase advance blocked") },
+            text = { Text(taskError) },
+            confirmButton = {
+                TextButton(onClick = { handleIntent(ChatIntent.ClearTaskError) }) {
+                    Text("OK")
+                }
+            }
+        )
+    }
 }
 
 @[Composable Preview]
 fun ContentPreview() {
     ChatContent(
-        state = remember { mutableStateOf(ChatUiState(settingsData = SettingsData("deepseek-v3.2"))) },
+        state = remember {
+            mutableStateOf(ChatUiState(settingsData = SettingsData("deepseek-v3.2")))
+        },
+        handleIntent = {},
+        onNavigateToProfiles = {}
+    )
+}
+
+@[Composable Preview]
+fun ContentPlanningModePreview() {
+    ChatContent(
+        state = remember {
+            mutableStateOf(
+                ChatUiState(
+                    settingsData = SettingsData("deepseek-v3.2", isPlanningMode = true),
+                    isPlanningMode = true
+                )
+            )
+        },
         handleIntent = {},
         onNavigateToProfiles = {}
     )

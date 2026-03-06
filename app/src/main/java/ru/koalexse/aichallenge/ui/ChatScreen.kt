@@ -16,13 +16,19 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -104,6 +110,9 @@ fun ChatScreen(
         MessageList(
             messages = messages,
             listState = listState,
+            isAdvancingPhase = currentUiState.isAdvancingPhase,
+            isLoading = isLoading,
+            onIntent = currentOnIntent,
             modifier = Modifier.weight(1f)
         )
 
@@ -214,6 +223,9 @@ private fun SessionStatsFooter(
 private fun MessageList(
     messages: List<Message>,
     listState: LazyListState,
+    isAdvancingPhase: Boolean,
+    isLoading: Boolean,
+    onIntent: (ChatIntent) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val messageList = remember(messages) { messages.reversed() }
@@ -225,6 +237,16 @@ private fun MessageList(
     ) {
         items(messageList, key = { it.id }) { message ->
             when {
+                // Task State bubble — Planning mode
+                message.id == TASK_STATE_BUBBLE_ID ->
+                    TaskStateBubble(
+                        text = message.text,
+                        isAdvancingPhase = isAdvancingPhase,
+                        isLoading = isLoading,
+                        onAdvancePhase = { onIntent(ChatIntent.AdvancePhase) },
+                        onResetTask = { onIntent(ChatIntent.ResetTask) }
+                    )
+
                 // Layered Memory bubbles — распознаём по id
                 message.id == "long_term_memory_bubble" ->
                     LongTermMemoryBubble(text = message.text)
@@ -300,6 +322,93 @@ private fun ErrorDialog(error: String, onDismiss: () -> Unit) {
             }
         }
     )
+}
+
+/**
+ * Bubble состояния задачи (Planning mode).
+ *
+ * Отображает текущую фазу, шаг, ожидаемое действие, инварианты и итоги
+ * завершённых фаз. Содержит кнопки:
+ * - «→ Next phase» — ручной переход с LLM-валидацией
+ * - «✕ Reset» — сброс (архивирование) текущей задачи
+ *
+ * Bubble самый верхний в ленте — пользователь всегда видит состояние задачи.
+ * Обновляется по [AgentStreamEvent.Completed] (смена фазы/шага).
+ */
+@Composable
+private fun TaskStateBubble(
+    text: String,
+    isAdvancingPhase: Boolean,
+    isLoading: Boolean,
+    onAdvancePhase: () -> Unit,
+    onResetTask: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
+        )
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+            Text(
+                text = "📋 Task state",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = text,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // → Next phase
+                Button(
+                    onClick = onAdvancePhase,
+                    enabled = !isLoading && !isAdvancingPhase,
+                    modifier = Modifier.weight(1f),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 8.dp, vertical = 4.dp
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                        contentDescription = null,
+                        modifier = Modifier.padding(end = 4.dp)
+                    )
+                    Text(
+                        text = if (isAdvancingPhase) "Checking…" else "Next phase",
+                        fontSize = 12.sp
+                    )
+                }
+                // ✕ Reset
+                OutlinedButton(
+                    onClick = onResetTask,
+                    enabled = !isLoading,
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 8.dp, vertical = 4.dp
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = null,
+                        modifier = Modifier.padding(end = 4.dp)
+                    )
+                    Text(text = "Reset", fontSize = 12.sp)
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -549,4 +658,15 @@ fun ChatScreenPreview() {
             )
         )
     }) { }
+}
+
+@[Composable Preview]
+fun TaskStateBubblePreview() {
+    TaskStateBubble(
+        text = "⚙️ Execution · Выполнение шагов задачи\nExpected: Выполните следующий шаг задачи\n\nCompleted phases:\n🗺️ Planning: Цель определена, декомпозиция готова…",
+        isAdvancingPhase = false,
+        isLoading = false,
+        onAdvancePhase = {},
+        onResetTask = {}
+    )
 }

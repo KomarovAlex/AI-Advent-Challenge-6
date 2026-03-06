@@ -5,11 +5,16 @@ import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
 import ru.koalexse.aichallenge.agent.context.facts.Fact
 import ru.koalexse.aichallenge.agent.context.memory.MemoryEntry
+import ru.koalexse.aichallenge.agent.task.TaskPhase
+import ru.koalexse.aichallenge.agent.task.TaskState
 import ru.koalexse.aichallenge.domain.Message
 import ru.koalexse.aichallenge.domain.SessionTokenStats
 
 /**
  * Тип активной стратегии управления контекстом.
+ *
+ * Task State Machine намеренно отсутствует: это не стратегия обрезки контекста,
+ * а отдельный режим работы агента. Включается через [SettingsData.isPlanningMode].
  */
 enum class ContextStrategyType {
     /** Скользящее окно: хранятся только последние N сообщений */
@@ -30,7 +35,7 @@ enum class ContextStrategyType {
      * - WORKING     — текущая задача, шаги, результаты (в LLM как system)
      * - LONG_TERM   — профиль, решения, знания (в LLM как system)
      */
-    LAYERED_MEMORY
+    LAYERED_MEMORY,
 }
 
 data class ChatUiState(
@@ -51,6 +56,13 @@ data class ChatUiState(
 
     /** Активная стратегия управления контекстом */
     val activeStrategy: ContextStrategyType = ContextStrategyType.SUMMARY,
+
+    /**
+     * Режим планирования — использует TaskStateMachineAgent вместо обычного агента.
+     * Независим от [activeStrategy]: можно включить поверх любой стратегии контекста.
+     * Управляется через [SettingsData.isPlanningMode] в диалоге настроек.
+     */
+    val isPlanningMode: Boolean = false,
 
     // ==================== Sticky Facts ====================
 
@@ -96,14 +108,38 @@ data class ChatUiState(
     val isRefreshingWorkingMemory: Boolean = false,
 
     /** true пока идёт LLM-вызов обновления LONG_TERM-памяти */
-    val isRefreshingLongTermMemory: Boolean = false
+    val isRefreshingLongTermMemory: Boolean = false,
+
+    // ==================== Task State Machine ====================
+
+    /**
+     * Текущее состояние задачи (только когда [isPlanningMode] == true).
+     * null = нет активной задачи.
+     */
+    val taskState: TaskState? = null,
+
+    /** true пока идёт LLM-валидация ответа или переход между фазами */
+    val isValidatingTask: Boolean = false,
+
+    /** Сообщение об ошибке валидации инвариантов (null = нет ошибки) */
+    val taskValidationError: String? = null,
+
+    /** true пока идёт ручной переход к следующей фазе (AdvancePhase) */
+    val isAdvancingPhase: Boolean = false,
+
+    /** Открыт ли диалог запуска новой задачи (ввод инвариантов) */
+    val isStartTaskDialogOpen: Boolean = false
 )
 
 data class SettingsData(
     val model: String,
     val temperature: String? = null,
     val tokens: String? = null,
-    val strategy: ContextStrategyType = ContextStrategyType.SUMMARY
+    val strategy: ContextStrategyType = ContextStrategyType.SUMMARY,
+    /** Максимальное число повторных попыток при нарушении инвариантов (Planning mode) */
+    val maxRetries: String? = null,
+    /** Включён ли Planning mode (Task State Machine) */
+    val isPlanningMode: Boolean = false
 )
 
 fun AgentConfig.toSettingsData(strategy: ContextStrategyType = ContextStrategyType.SUMMARY) =
@@ -116,3 +152,12 @@ fun AgentConfig.toSettingsData(strategy: ContextStrategyType = ContextStrategyTy
 
 fun SettingsData.isEmpty() =
     model.isEmpty() && temperature.isNullOrEmpty() && tokens.isNullOrEmpty()
+
+// ==================== Отображаемые имена фаз ====================
+
+fun TaskPhase.displayName(): String = when (this) {
+    TaskPhase.PLANNING   -> "🗺️ Planning"
+    TaskPhase.EXECUTION  -> "⚙️ Execution"
+    TaskPhase.VALIDATION -> "✅ Validation"
+    TaskPhase.DONE       -> "🏁 Done"
+}

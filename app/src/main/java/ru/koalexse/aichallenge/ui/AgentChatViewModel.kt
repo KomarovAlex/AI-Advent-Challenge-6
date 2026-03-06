@@ -11,9 +11,9 @@ import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import ru.koalexse.aichallenge.agent.Agent
 import ru.koalexse.aichallenge.agent.AgentMessage
 import ru.koalexse.aichallenge.agent.AgentStreamEvent
+import ru.koalexse.aichallenge.agent.ConfigurableAgent
 import ru.koalexse.aichallenge.agent.context.branch.DialogBranch
 import ru.koalexse.aichallenge.agent.context.facts.Fact
 import ru.koalexse.aichallenge.agent.context.memory.MemoryEntry
@@ -23,6 +23,11 @@ import ru.koalexse.aichallenge.agent.context.strategy.LayeredMemoryStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.StickyFactsStrategy
 import ru.koalexse.aichallenge.agent.context.strategy.SummaryTruncationStrategy
 import ru.koalexse.aichallenge.agent.context.summary.ConversationSummary
+import ru.koalexse.aichallenge.agent.task.AdvancePhaseResult
+import ru.koalexse.aichallenge.agent.task.PhaseInvariants
+import ru.koalexse.aichallenge.agent.task.TaskPhase
+import ru.koalexse.aichallenge.agent.task.TaskState
+import ru.koalexse.aichallenge.agent.task.TaskStateMachineAgent
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toMessages
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toSession
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryMapper.toSessionTokenStats
@@ -37,7 +42,7 @@ import ru.koalexse.aichallenge.ui.state.toSettingsData
 import java.util.UUID
 
 class AgentChatViewModel(
-    private val agent: Agent,
+    private val agent: ConfigurableAgent,
     private val availableModels: List<String>,
     private val chatHistoryRepository: ru.koalexse.aichallenge.data.persistence.ChatHistoryRepository? = null,
     initialStrategy: ContextStrategyType = ContextStrategyType.SUMMARY,
@@ -46,7 +51,12 @@ class AgentChatViewModel(
      * Принимает [ContextStrategyType], возвращает готовую стратегию.
      * Инжектируется из AppModule, чтобы ViewModel не зависела от Android Context напрямую.
      */
-    private val strategyFactory: ((ContextStrategyType) -> ContextTruncationStrategy?)? = null
+    private val strategyFactory: ((ContextStrategyType) -> ContextTruncationStrategy?)? = null,
+    /**
+     * Task State Machine агент — предоставляется из AppModule.
+     * null = Planning mode недоступен.
+     */
+    private val taskStateMachineAgent: TaskStateMachineAgent? = null
 ) : ViewModel() {
 
     private data class StreamingMessage(
@@ -89,6 +99,13 @@ class AgentChatViewModel(
         val memoryCompressedMessages: List<AgentMessage> = emptyList(),
         val isRefreshingWorkingMemory: Boolean = false,
         val isRefreshingLongTermMemory: Boolean = false,
+        // Planning mode (Task State Machine)
+        val isPlanningMode: Boolean = false,
+        val taskState: TaskState? = null,
+        val isValidatingTask: Boolean = false,
+        val taskValidationError: String? = null,
+        val isAdvancingPhase: Boolean = false,
+        val isStartTaskDialogOpen: Boolean = false,
         // Strategy
         val activeStrategy: ContextStrategyType
     )
@@ -132,6 +149,15 @@ class AgentChatViewModel(
     private val layeredMemoryStrategy: LayeredMemoryStrategy?
         get() = agent.truncationStrategy as? LayeredMemoryStrategy
 
+    /**
+     * Активный агент — [TaskStateMachineAgent] в Planning mode, иначе обычный [agent].
+     * Planning mode и стратегия контекста независимы: TSM использует свой innerAgent,
+     * который не конфликтует с [agent].
+     */
+    private val activeAgent: ConfigurableAgent
+        get() = if (_internalState.value.isPlanningMode && taskStateMachineAgent != null)
+            taskStateMachineAgent else agent
+
     // ==================== UI State ====================
 
     private fun buildUiState(): ChatUiState {
@@ -153,7 +179,7 @@ class AgentChatViewModel(
             else
                 emptyList()
 
-        val historyMessages = agent.conversationHistory.toActiveUiMessages(
+        val historyMessages = activeAgent.conversationHistory.toActiveUiMessages(
             lastMessageStats = internal.lastMessageStats,
             lastMessageDuration = internal.lastMessageDuration
         )
@@ -174,9 +200,16 @@ class AgentChatViewModel(
             listOfNotNull(internal.workingMemory.toWorkingMemoryUiMessage())
         else emptyList()
 
+        // Planning mode — Task State bubble: только если режим активен и задача существует
+        val taskStateMessages = if (internal.isPlanningMode)
+            listOfNotNull(internal.taskState?.toTaskStateBubbleMessage())
+        else
+            emptyList()
+
         // Порядок сверху вниз в ленте (список перевёрнут в LazyColumn с reverseLayout):
-        // long-term → working → memory-compressed → facts-compressed → summaries-compressed → history → streaming
+        // task-state → long-term → working → memory-compressed → facts-compressed → summaries-compressed → history → streaming
         val allMessages =
+            taskStateMessages +
             longTermMemoryMessages +
             workingMemoryMessages +
             memoryCompressedMessages +
@@ -197,6 +230,7 @@ class AgentChatViewModel(
             sessionStats = internal.sessionStats.takeIf { it.messageCount > 0 },
             compressedMessageCount = compressedMessages.size + factsCompressedMessages.size + memoryCompressedMessages.size,
             activeStrategy = internal.activeStrategy,
+            isPlanningMode = internal.isPlanningMode,
             facts = internal.facts,
             isRefreshingFacts = internal.isRefreshingFacts,
             branches = internal.branches,
@@ -208,7 +242,13 @@ class AgentChatViewModel(
             longTermMemory = internal.longTermMemory,
             memoryCompressedMessages = internal.memoryCompressedMessages,
             isRefreshingWorkingMemory = internal.isRefreshingWorkingMemory,
-            isRefreshingLongTermMemory = internal.isRefreshingLongTermMemory
+            isRefreshingLongTermMemory = internal.isRefreshingLongTermMemory,
+            // Task State Machine
+            taskState = internal.taskState,
+            isValidatingTask = internal.isValidatingTask,
+            taskValidationError = internal.taskValidationError,
+            isAdvancingPhase = internal.isAdvancingPhase,
+            isStartTaskDialogOpen = internal.isStartTaskDialogOpen
         )
     }
 
@@ -238,6 +278,16 @@ class AgentChatViewModel(
             ChatIntent.RefreshWorkingMemory  -> refreshWorkingMemory()
             ChatIntent.RefreshLongTermMemory -> refreshLongTermMemory()
             ChatIntent.ClearAllMemory        -> clearAllMemory()
+            // Task State Machine
+            ChatIntent.OpenStartTaskDialog ->
+                _internalState.update { it.copy(isStartTaskDialogOpen = true) }
+            ChatIntent.CloseStartTaskDialog ->
+                _internalState.update { it.copy(isStartTaskDialogOpen = false) }
+            is ChatIntent.StartTask    -> startTask(intent.phaseInvariants)
+            ChatIntent.AdvancePhase    -> advancePhase()
+            ChatIntent.ResetTask       -> resetTask()
+            ChatIntent.ClearTaskError  ->
+                _internalState.update { it.copy(taskValidationError = null) }
         }
     }
 
@@ -249,7 +299,7 @@ class AgentChatViewModel(
     }
 
     private suspend fun handleAgentStream(userText: String) {
-        agent.send(userText).also {
+        activeAgent.send(userText).also {
             _internalState.update {
                 it.copy(streamingMessage = StreamingMessage(), lastMessageStats = null, lastMessageDuration = null)
             }
@@ -266,8 +316,8 @@ class AgentChatViewModel(
 
                 is AgentStreamEvent.Completed -> {
                     val newSummaries = summaryStrategy?.getSummaries() ?: emptyList()
-                    val newBranches  = agent.getBranches()
-                    val newActiveId  = agent.getActiveBranchId()
+                    val newBranches  = activeAgent.getBranches()
+                    val newActiveId  = activeAgent.getActiveBranchId()
                     // StickyFacts — синхронизация после авторефреша в truncate()
                     val newFacts           = factsStrategy?.getFacts() ?: emptyList()
                     val newFactsCompressed = factsStrategy?.getCompressedMessages() ?: emptyList()
@@ -275,6 +325,10 @@ class AgentChatViewModel(
                     val newWorking            = layeredMemoryStrategy?.getWorkingMemory() ?: emptyList()
                     val newLongTerm           = layeredMemoryStrategy?.getLongTermMemory() ?: emptyList()
                     val newMemoryCompressed   = layeredMemoryStrategy?.getCompressedMessages() ?: emptyList()
+                    // Planning mode — синхронизация состояния задачи после ответа
+                    val newTaskState = if (_internalState.value.isPlanningMode)
+                        taskStateMachineAgent?.getTaskState()
+                    else null
 
                     _internalState.update { state ->
                         state.copy(
@@ -290,7 +344,8 @@ class AgentChatViewModel(
                             activeBranchId            = newActiveId,
                             workingMemory             = newWorking,
                             longTermMemory            = newLongTerm,
-                            memoryCompressedMessages  = newMemoryCompressed
+                            memoryCompressedMessages  = newMemoryCompressed,
+                            taskState                 = newTaskState ?: state.taskState
                         )
                     }
                 }
@@ -325,8 +380,10 @@ class AgentChatViewModel(
     // ==================== Settings & Strategy switch ====================
 
     private fun handleSettingsUpdate(settingsData: SettingsData) {
-        val oldStrategy = _internalState.value.activeStrategy
-        val newStrategy = settingsData.strategy
+        val oldStrategy    = _internalState.value.activeStrategy
+        val newStrategy    = settingsData.strategy
+        val wasPlanningMode = _internalState.value.isPlanningMode
+        val nowPlanningMode = settingsData.isPlanningMode
 
         val temperature = runCatching { settingsData.temperature?.toFloat() }.getOrNull()
         val tokens      = runCatching { settingsData.tokens?.toLong() }.getOrNull()
@@ -340,14 +397,31 @@ class AgentChatViewModel(
         )
 
         _internalState.update {
-            it.copy(settingsData = settingsData, isSettingsOpen = false, activeStrategy = newStrategy)
+            it.copy(
+                settingsData    = settingsData,
+                isSettingsOpen  = false,
+                activeStrategy  = newStrategy,
+                isPlanningMode  = nowPlanningMode,
+                taskValidationError = if (!nowPlanningMode) null else it.taskValidationError
+            )
         }
 
-        if (newStrategy != oldStrategy && strategyFactory != null) {
-            viewModelScope.launch { applyStrategyChange(newStrategy) }
-        } else {
-            viewModelScope.launch { saveHistory() }
+        when {
+            // Planning mode только что включён — загрузить состояние задачи
+            !wasPlanningMode && nowPlanningMode -> {
+                viewModelScope.launch {
+                    val savedTaskState = taskStateMachineAgent?.getTaskState()
+                    _internalState.update { it.copy(taskState = savedTaskState) }
+                }
+            }
+            // Стратегия контекста изменилась — применить смену
+            newStrategy != oldStrategy && strategyFactory != null -> {
+                viewModelScope.launch { applyStrategyChange(newStrategy) }
+                return
+            }
         }
+
+        viewModelScope.launch { saveHistory() }
     }
 
     /**
@@ -374,7 +448,8 @@ class AgentChatViewModel(
                 lastMessageDuration = null,
                 workingMemory = emptyList(),
                 longTermMemory = emptyList(),
-                memoryCompressedMessages = emptyList()
+                memoryCompressedMessages = emptyList(),
+                taskValidationError = null
             )
         }
 
@@ -431,7 +506,7 @@ class AgentChatViewModel(
 
     private fun clearSession() {
         viewModelScope.launch {
-            agent.clearHistory()
+            activeAgent.clearHistory()
             currentSessionId = UUID.randomUUID().toString()
             sessionCreatedAt = System.currentTimeMillis()
 
@@ -450,6 +525,12 @@ class AgentChatViewModel(
             // долговременная — остаётся (clearSession в MemoryStorage)
             val longTermAfterClear = layeredMemoryStrategy?.getLongTermMemory() ?: emptyList()
 
+            // Planning mode: история чата сбрасывается, задача НЕ сбрасывается
+            // (пауза — пользователь должен продолжить задачу)
+            val currentTaskState = if (_internalState.value.isPlanningMode)
+                taskStateMachineAgent?.getTaskState()
+            else null
+
             _internalState.update {
                 it.copy(
                     currentSessionId         = currentSessionId,
@@ -466,7 +547,8 @@ class AgentChatViewModel(
                     isBranchLimitReached     = false,
                     workingMemory            = emptyList(),
                     longTermMemory           = longTermAfterClear,  // persist!
-                    memoryCompressedMessages = emptyList()
+                    memoryCompressedMessages = emptyList(),
+                    taskState                = currentTaskState  // persist задача при паузе!
                 )
             }
             chatHistoryRepository?.clearAll()
@@ -632,6 +714,97 @@ class AgentChatViewModel(
         }
     }
 
+    // ==================== Task State Machine ====================
+
+    /**
+     * Запускает новую задачу с инвариантами по фазам.
+     *
+     * @param phaseInvariants список пар (phase, rules) из UI-ввода пользователя
+     */
+    private fun startTask(phaseInvariants: List<PhaseInvariants>) {
+        val tsm = taskStateMachineAgent ?: return
+        _internalState.update { it.copy(isStartTaskDialogOpen = false, isLoading = true) }
+        viewModelScope.launch {
+            try {
+                val newState = tsm.startTask(phaseInvariants)
+                _internalState.update {
+                    it.copy(taskState = newState, isLoading = false, taskValidationError = null)
+                }
+            } catch (e: Exception) {
+                _internalState.update {
+                    it.copy(isLoading = false, error = e.message ?: "Failed to start task")
+                }
+            }
+        }
+    }
+
+    /**
+     * Ручной переход к следующей фазе с LLM-валидацией готовности.
+     * Вызывается из [TaskStateBubble] (кнопка «→ Next phase»).
+     */
+    private fun advancePhase() {
+        val tsm = taskStateMachineAgent ?: return
+        if (_internalState.value.isAdvancingPhase) return
+        _internalState.update { it.copy(isAdvancingPhase = true, taskValidationError = null) }
+        viewModelScope.launch {
+            try {
+                when (val result = tsm.advancePhase()) {
+                    is AdvancePhaseResult.Advanced -> {
+                        _internalState.update {
+                            it.copy(taskState = result.newState, isAdvancingPhase = false)
+                        }
+                    }
+                    is AdvancePhaseResult.NotReady -> {
+                        val reason = result.reasons.joinToString("; ")
+                        _internalState.update {
+                            it.copy(
+                                isAdvancingPhase = false,
+                                taskValidationError = "Not ready to advance: $reason"
+                            )
+                        }
+                    }
+                    AdvancePhaseResult.NoActiveTask -> {
+                        _internalState.update {
+                            it.copy(isAdvancingPhase = false, taskValidationError = "No active task")
+                        }
+                    }
+                    AdvancePhaseResult.AlreadyDone -> {
+                        _internalState.update {
+                            it.copy(isAdvancingPhase = false, taskValidationError = "Task is already done")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                _internalState.update {
+                    it.copy(isAdvancingPhase = false, error = e.message ?: "Failed to advance phase")
+                }
+            }
+        }
+    }
+
+    /**
+     * Сбрасывает текущую задачу (архивирует) и возвращает в исходное состояние.
+     * Вызывается из [TaskStateBubble] (кнопка «✕ Reset»).
+     */
+    private fun resetTask() {
+        val tsm = taskStateMachineAgent ?: return
+        viewModelScope.launch {
+            try {
+                val newState = tsm.resetTask()
+                _internalState.update {
+                    it.copy(
+                        taskState = newState.takeIf { s -> s.isActive },
+                        taskValidationError = null
+                    )
+                }
+            } catch (e: Exception) {
+                _internalState.update {
+                    it.copy(error = e.message ?: "Failed to reset task")
+                }
+            }
+        }
+    }
+
     // ==================== Persistence ====================
 
     private suspend fun loadSavedHistory() {
@@ -648,6 +821,11 @@ class AgentChatViewModel(
                         isBranchLimitReached = branches.size >= BranchingStrategy.MAX_BRANCHES
                     )
                 }
+            }
+            // Planning mode: загружаем персистированное состояние задачи
+            if (_internalState.value.isPlanningMode) {
+                val savedTaskState = taskStateMachineAgent?.getTaskState()
+                _internalState.update { it.copy(taskState = savedTaskState) }
             }
             return
         }
@@ -696,7 +874,6 @@ class AgentChatViewModel(
             }
 
             // LayeredMemory: загружаем все три слоя через capability accessor.
-            // JsonMemoryStorage восстанавливает данные из файлов при первом обращении.
             val savedWorking    = layeredMemoryStrategy?.getWorkingMemory() ?: emptyList()
             val savedLongTerm   = layeredMemoryStrategy?.getLongTermMemory() ?: emptyList()
             val savedMemCompr   = layeredMemoryStrategy?.getCompressedMessages() ?: emptyList()
@@ -722,6 +899,14 @@ class AgentChatViewModel(
                     )
                 }
             }
+
+            // Planning mode: загружаем персистированное состояние задачи
+            if (_internalState.value.isPlanningMode) {
+                val savedTaskState = taskStateMachineAgent?.getTaskState()
+                if (savedTaskState != null) {
+                    _internalState.update { it.copy(taskState = savedTaskState) }
+                }
+            }
         } catch (e: Exception) {
             println(e)
         } finally {
@@ -740,7 +925,11 @@ class AgentChatViewModel(
             return
         }
 
-        val history = agent.conversationHistory
+        // Planning mode: TaskStateMachineAgent сохраняет своё состояние автоматически
+        val historyAgent = if (_internalState.value.isPlanningMode && taskStateMachineAgent != null)
+            taskStateMachineAgent else agent
+
+        val history = historyAgent.conversationHistory
         if (history.isEmpty()) return
 
         try {
@@ -785,4 +974,15 @@ sealed class ChatIntent {
     data object RefreshWorkingMemory  : ChatIntent()
     data object RefreshLongTermMemory : ChatIntent()
     data object ClearAllMemory        : ChatIntent()
+    // Task State Machine actions
+    data object OpenStartTaskDialog   : ChatIntent()
+    data object CloseStartTaskDialog  : ChatIntent()
+    /** Запустить задачу с инвариантами по фазам */
+    data class StartTask(val phaseInvariants: List<PhaseInvariants>) : ChatIntent()
+    /** Ручной переход к следующей фазе (с LLM-валидацией готовности) */
+    data object AdvancePhase          : ChatIntent()
+    /** Сбросить текущую задачу (архивировать) */
+    data object ResetTask             : ChatIntent()
+    /** Сбросить ошибку валидации задачи */
+    data object ClearTaskError        : ChatIntent()
 }

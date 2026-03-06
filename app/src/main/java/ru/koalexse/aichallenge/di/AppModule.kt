@@ -1,9 +1,9 @@
 package ru.koalexse.aichallenge.di
 
 import android.content.Context
-import ru.koalexse.aichallenge.agent.Agent
 import ru.koalexse.aichallenge.agent.AgentConfig
 import ru.koalexse.aichallenge.agent.AgentFactory
+import ru.koalexse.aichallenge.agent.ConfigurableAgent
 import ru.koalexse.aichallenge.agent.SimpleLLMAgent
 import ru.koalexse.aichallenge.agent.StatsLLMApi
 import ru.koalexse.aichallenge.agent.buildAgent
@@ -20,6 +20,7 @@ import ru.koalexse.aichallenge.agent.context.summary.SimpleSummaryProvider
 import ru.koalexse.aichallenge.agent.context.summary.SummaryProvider
 import ru.koalexse.aichallenge.agent.profile.ActiveProfileSystemPromptProvider
 import ru.koalexse.aichallenge.agent.profile.ProfileSystemPromptProvider
+import ru.koalexse.aichallenge.agent.task.TaskStateMachineAgent
 import ru.koalexse.aichallenge.data.LLMApi
 import ru.koalexse.aichallenge.data.OpenAIApi
 import ru.koalexse.aichallenge.data.StatsTrackingLLMApi
@@ -28,6 +29,7 @@ import ru.koalexse.aichallenge.data.persistence.JsonBranchStorage
 import ru.koalexse.aichallenge.data.persistence.JsonChatHistoryRepository
 import ru.koalexse.aichallenge.data.persistence.JsonFactsStorage
 import ru.koalexse.aichallenge.data.persistence.JsonMemoryStorage
+import ru.koalexse.aichallenge.data.persistence.JsonTaskStateStorage
 import ru.koalexse.aichallenge.data.persistence.profile.JsonProfileStorage
 import ru.koalexse.aichallenge.ui.AgentChatViewModel
 import ru.koalexse.aichallenge.ui.profile.ProfileEditViewModel
@@ -75,7 +77,7 @@ class AppModule(
      * активный профиль из [profileStorage]. Смена профиля пользователем отражается
      * в следующем запросе без перезапуска агента.
      *
-     * Агент (`SimpleLLMAgent`) получает только интерфейс [ProfileSystemPromptProvider]
+     * Агент ([SimpleLLMAgent]) получает только интерфейс [ProfileSystemPromptProvider]
      * и не знает об Android-зависимостях внутри провайдера.
      */
     val profilePromptProvider: ProfileSystemPromptProvider by lazy {
@@ -87,6 +89,12 @@ class AppModule(
 
     // ==================== Фабрика стратегий ====================
 
+    /**
+     * Возвращает стратегию обрезки контекста для обычного агента.
+     *
+     * Task State Machine — отдельный режим ([AgentChatViewModel.isPlanningMode]),
+     * не стратегия. Для него используется [createTaskStateMachineAgent].
+     */
     fun buildStrategy(type: ContextStrategyType): ContextTruncationStrategy? = when (type) {
         ContextStrategyType.SLIDING_WINDOW -> SlidingWindowStrategy()
 
@@ -112,10 +120,43 @@ class AppModule(
         )
     }
 
+    // ==================== Task State Machine ====================
+
+    /**
+     * Создаёт [TaskStateMachineAgent] — обёртку над отдельным [SimpleLLMAgent]
+     * с [SummaryTruncationStrategy] внутри.
+     *
+     * [JsonTaskStateStorage] персистирует состояние задачи в `task_state.json`.
+     * Состояние сохраняется между сессиями — пауза и продолжение без повторных объяснений.
+     *
+     * @param maxRetries максимальное число повторных попыток при нарушении инвариантов
+     */
+    fun createTaskStateMachineAgent(maxRetries: Int = TaskStateMachineAgent.DEFAULT_MAX_RETRIES): TaskStateMachineAgent {
+        val innerStrategy = SummaryTruncationStrategy(
+            summaryProvider = LLMSummaryProvider(api = statsLLMApi, model = defaultModel),
+            summaryStorage = JsonSummaryStorage(context)
+        )
+        val innerAgent = SimpleLLMAgent(
+            api = statsLLMApi,
+            initialConfig = agentConfig,
+            agentContext = SimpleAgentContext(),
+            truncationStrategy = innerStrategy,
+            profilePromptProvider = profilePromptProvider
+        )
+        return TaskStateMachineAgent(
+            innerAgent = innerAgent,
+            api = statsLLMApi,
+            taskStateStorage = JsonTaskStateStorage(context),
+            taskModel = defaultModel,
+            maxRetries = maxRetries
+        )
+    }
+
     // ==================== Фабричные методы ViewModel ====================
 
     fun createAgentChatViewModel(
-        initialStrategyType: ContextStrategyType = ContextStrategyType.SUMMARY
+        initialStrategyType: ContextStrategyType = ContextStrategyType.SUMMARY,
+        maxRetries: Int = TaskStateMachineAgent.DEFAULT_MAX_RETRIES
     ): AgentChatViewModel {
         val initialStrategy = buildStrategy(initialStrategyType)
         val agent = SimpleLLMAgent(
@@ -125,12 +166,15 @@ class AppModule(
             truncationStrategy = initialStrategy,
             profilePromptProvider = profilePromptProvider
         )
+        // TaskStateMachineAgent создаётся один раз — персистентное состояние
+        val taskAgent = createTaskStateMachineAgent(maxRetries)
         return AgentChatViewModel(
             agent = agent,
             availableModels = availableModels,
             chatHistoryRepository = chatHistoryRepository,
             initialStrategy = initialStrategyType,
-            strategyFactory = ::buildStrategy
+            strategyFactory = ::buildStrategy,
+            taskStateMachineAgent = taskAgent
         )
     }
 
@@ -163,7 +207,8 @@ class AppModule(
             availableModels = availableModels,
             chatHistoryRepository = chatHistoryRepository,
             initialStrategy = ContextStrategyType.SUMMARY,
-            strategyFactory = ::buildStrategy
+            strategyFactory = ::buildStrategy,
+            taskStateMachineAgent = createTaskStateMachineAgent()
         )
     }
 
@@ -186,7 +231,7 @@ class AppModule(
 
     // ==================== Прочее ====================
 
-    fun createAgentWithBuilder(block: AgentBuilderScope.() -> Unit): Agent {
+    fun createAgentWithBuilder(block: AgentBuilderScope.() -> Unit): ConfigurableAgent {
         val scope = AgentBuilderScope()
         scope.block()
         return buildAgent {
@@ -201,7 +246,7 @@ class AppModule(
         }
     }
 
-    val agent: Agent by lazy {
+    val agent: ConfigurableAgent by lazy {
         AgentFactory.createAgentWithStats(statsLLMApi, agentConfig)
     }
 
