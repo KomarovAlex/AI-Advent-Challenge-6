@@ -53,6 +53,13 @@ import java.util.UUID
  * PLANNING → EXECUTION → VALIDATION → DONE → (новая задача)
  * ```
  *
+ * ## Разрешённые переходы
+ * Единственный разрешённый переход из фазы F — строго в F.next().
+ * Любой сигнал [TaskSignal.SuggestPhase], указывающий на фазу, отличную
+ * от F.next(), молча игнорируется — состояние не меняется.
+ * Проверка централизована в [isTransitionAllowed] и используется во всех
+ * точках, где происходит смена фазы.
+ *
  * ## Передача данных между фазами
  * При переходе фазы агент:
  * 1. Извлекает итог текущей фазы из тега `[OUTPUT: <текст>]` (или берёт fallback)
@@ -321,6 +328,12 @@ class TaskStateMachineAgent(
      *
      * ## Instructions              ← теги для LLM
      * ```
+     *
+     * ### Шаг 3: ограничение тега [PHASE: X]
+     * В секции Instructions тег [PHASE: X] теперь показывает только
+     * единственную разрешённую следующую фазу (state.phase.next()).
+     * Если текущая фаза — DONE, инструкция по смене фазы не добавляется совсем.
+     * Это исключает саму возможность того, что LLM предложит прыжок через фазу.
      */
     private fun buildSystemPromptBlock(state: TaskState, existingPrompt: String?): String {
         val sb = StringBuilder()
@@ -358,7 +371,14 @@ class TaskStateMachineAgent(
         sb.appendLine()
         sb.appendLine("## Instructions")
         sb.appendLine("At the end of your response, if the current step is complete, add: [PHASE_COMPLETE]")
-        sb.appendLine("To suggest a specific next phase: [PHASE: planning|execution|validation|done]")
+
+        // Шаг 3: показываем только единственную разрешённую следующую фазу.
+        // LLM не видит другие варианты и не может предложить прыжок через фазу.
+        val nextPhase = state.phase.next()
+        if (nextPhase != null) {
+            sb.appendLine("To suggest moving to the next phase: [PHASE: ${nextPhase.name.lowercase()}]")
+        }
+
         sb.appendLine("To update the current step description: [STEP: description]")
         sb.appendLine("To update the expected action: [EXPECTED: description]")
         sb.appendLine("To summarize the current phase output for the next phase: [OUTPUT: summary text]")
@@ -460,8 +480,10 @@ class TaskStateMachineAgent(
     /**
      * Применяет [TaskSignal] к состоянию и возвращает новое состояние.
      *
-     * При [TaskSignal.PhaseComplete] и [TaskSignal.SuggestPhase] — вызывает
-     * [transitionToPhase], который фиксирует [PhaseOutput] и очищает WORKING-память.
+     * При [TaskSignal.PhaseComplete] — всегда переходит строго на state.phase.next().
+     * При [TaskSignal.SuggestPhase] — переход выполняется только если signal.next
+     * совпадает с разрешённой следующей фазой ([isTransitionAllowed]).
+     * Недопустимый SuggestPhase молча игнорируется: состояние не меняется.
      */
     private suspend fun applySignalAndTransition(
         state: TaskState,
@@ -472,6 +494,7 @@ class TaskStateMachineAgent(
 
         return when (signal) {
             is TaskSignal.PhaseComplete -> {
+                // PhaseComplete всегда идёт строго на next() — прыжок невозможен
                 val next = state.phase.next()
                 if (next != null) {
                     transitionToPhase(state, next, fullResponse, now)
@@ -480,7 +503,15 @@ class TaskStateMachineAgent(
                 }
             }
 
-            is TaskSignal.SuggestPhase -> transitionToPhase(state, signal.next, fullResponse, now)
+            is TaskSignal.SuggestPhase -> {
+                // Шаг 1+2: проверяем через isTransitionAllowed — только +1 фаза разрешена.
+                // Если LLM предложил прыжок (например, PLANNING → DONE) — игнорируем молча.
+                if (isTransitionAllowed(state.phase, signal.next)) {
+                    transitionToPhase(state, signal.next, fullResponse, now)
+                } else {
+                    state.copy(retryCount = 0, updatedAt = now)
+                }
+            }
 
             is TaskSignal.UpdateStep -> state.copy(
                 currentStep = signal.step,
@@ -559,6 +590,24 @@ class TaskStateMachineAgent(
         val layeredStrategy = innerAgent.truncationStrategy as? LayeredMemoryStrategy
         layeredStrategy?.clearWorkingMemory()
     }
+
+    // ==================== Private: контроль переходов ====================
+
+    /**
+     * Единственный источник правил допустимости переходов между фазами.
+     *
+     * Переход из [from] в [target] разрешён тогда и только тогда,
+     * когда [target] == [from].next() — то есть строго следующая фаза.
+     * Прыжки через фазы (PLANNING → VALIDATION, PLANNING → DONE и т.п.) запрещены.
+     *
+     * Используется в:
+     * - [applySignalAndTransition] — для сигнала [TaskSignal.SuggestPhase]
+     *
+     * Не используется для [TaskSignal.PhaseComplete] и [advancePhase], так как
+     * там переход всегда строится через [TaskPhase.next] напрямую.
+     */
+    private fun isTransitionAllowed(from: TaskPhase, target: TaskPhase): Boolean =
+        from.next() == target
 
     // ==================== Private: LLM-валидация ====================
 
