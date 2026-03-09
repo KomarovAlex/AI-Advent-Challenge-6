@@ -60,6 +60,16 @@ android {
                 "OPENAI_MODELS",
                 "\"${secrets.getProperty("OPENAI_MODELS", "gpt-3.5-turbo")}\""
             )
+            buildConfigField(
+                "String",
+                "MCP_URL",
+                "\"${
+                    secrets.getProperty(
+                        "MCP_URL",
+                        "https://mcp001.vkusvill.ru/mcp"
+                    )
+                }\""
+            )
         }
         debug {
             buildConfigField(
@@ -81,6 +91,16 @@ android {
                 "String",
                 "OPENAI_MODELS",
                 "\"${secrets.getProperty("OPENAI_MODELS", "gpt-3.5-turbo")}\""
+            )
+            buildConfigField(
+                "String",
+                "MCP_URL",
+                "\"${
+                    secrets.getProperty(
+                        "MCP_URL",
+                        "https://mcp001.vkusvill.ru/mcp"
+                    )
+                }\""
             )
         }
     }
@@ -108,6 +128,7 @@ dependencies {
     implementation(libs.multiplatform.markdown.renderer.m3)
 
     implementation(libs.okhttp)
+    implementation(libs.okhttp.sse)
     implementation(libs.retrofit)
     implementation(libs.converter.gson)
 

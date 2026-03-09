@@ -7,12 +7,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Work
 import androidx.compose.material3.AlertDialog
@@ -38,6 +38,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import ru.koalexse.aichallenge.R
 import ru.koalexse.aichallenge.agent.task.TaskPhase
+import ru.koalexse.aichallenge.ui.mcp.McpToolsDialog
+import ru.koalexse.aichallenge.ui.mcp.McpViewModel
 import ru.koalexse.aichallenge.ui.state.ChatUiState
 import ru.koalexse.aichallenge.ui.state.ContextStrategyType
 import ru.koalexse.aichallenge.ui.state.SettingsData
@@ -48,10 +50,12 @@ import ru.koalexse.aichallenge.ui.state.displayName
 fun ChatContent(
     state: State<ChatUiState>,
     handleIntent: (ChatIntent) -> Unit,
-    onNavigateToProfiles: () -> Unit
+    onNavigateToProfiles: () -> Unit,
+    mcpViewModel: McpViewModel? = null
 ) {
     val uiState by remember { derivedStateOf { state.value } }
     var overflowExpanded by remember { mutableStateOf(false) }
+    var isMcpDialogOpen by remember { mutableStateOf(false) }
 
     val isPlanningMode = uiState.isPlanningMode
     val taskState = uiState.taskState
@@ -66,7 +70,6 @@ fun ChatContent(
         topBar = {
             TopAppBar(
                 title = {
-                    // В Planning mode — показываем фазу в заголовке если задача активна
                     if (isPlanningMode && hasActiveTask && taskPhase != null) {
                         Text("${taskPhase.displayName()} · ${uiState.settingsData.model}")
                     } else {
@@ -74,8 +77,7 @@ fun ChatContent(
                     }
                 },
                 actions = {
-                    // ── Planning mode: кнопка «▶ Новая задача» ────────────────────────
-                    // Кнопки AdvancePhase и ResetTask перенесены в TaskStateBubble
+                    // ── Planning mode: кнопка «▶ Новая задача» ──────────────
                     if (isPlanningMode && (!hasActiveTask || taskPhase == TaskPhase.DONE)) {
                         IconButton(
                             onClick = { handleIntent(ChatIntent.OpenStartTaskDialog) },
@@ -88,7 +90,7 @@ fun ChatContent(
                         }
                     }
 
-                    // ── Strategy-specific primary actions ─────────────────────────────
+                    // ── Strategy-specific primary actions ────────────────────
                     when (uiState.activeStrategy) {
 
                         ContextStrategyType.STICKY_FACTS -> {
@@ -101,7 +103,6 @@ fun ChatContent(
                                     contentDescription = stringResource(R.string.toolbar_refresh_facts)
                                 )
                             }
-
                             IconButton(
                                 onClick = onNavigateToProfiles,
                                 enabled = !uiState.isLoading
@@ -125,7 +126,6 @@ fun ChatContent(
                                     contentDescription = stringResource(R.string.toolbar_checkpoint)
                                 )
                             }
-
                             IconButton(
                                 onClick = { handleIntent(ChatIntent.OpenBranchDialog) },
                                 enabled = !uiState.isLoading && !uiState.isSwitchingBranch
@@ -147,7 +147,6 @@ fun ChatContent(
                                     contentDescription = stringResource(R.string.toolbar_refresh_working_memory)
                                 )
                             }
-
                             IconButton(
                                 onClick = { handleIntent(ChatIntent.RefreshLongTermMemory) },
                                 enabled = !uiState.isLoading && !uiState.isRefreshingLongTermMemory
@@ -169,7 +168,6 @@ fun ChatContent(
                                     contentDescription = stringResource(R.string.toolbar_profiles)
                                 )
                             }
-
                             IconButton(
                                 onClick = { handleIntent(ChatIntent.OpenSettings) },
                                 enabled = !uiState.isLoading
@@ -182,7 +180,7 @@ fun ChatContent(
                         }
                     }
 
-                    // ── Overflow menu (⋮) ─────────────────────────────────────────────
+                    // ── Overflow menu (⋮) ────────────────────────────────────
                     IconButton(onClick = { overflowExpanded = true }) {
                         Icon(
                             imageVector = Icons.Default.MoreVert,
@@ -195,10 +193,6 @@ fun ChatContent(
                         onDismissRequest = { overflowExpanded = false }
                     ) {
                         when (uiState.activeStrategy) {
-                            ContextStrategyType.STICKY_FACTS -> {
-                                // Profiles is already an icon; Settings + Clear go here
-                            }
-
                             ContextStrategyType.BRANCHING,
                             ContextStrategyType.LAYERED_MEMORY -> {
                                 DropdownMenuItem(
@@ -213,11 +207,9 @@ fun ChatContent(
                                     enabled = !uiState.isLoading
                                 )
                             }
-
-                            else -> { /* Profiles + Settings already shown as icons */ }
+                            else -> {}
                         }
 
-                        // Settings — only when it wasn't shown as an icon
                         if (uiState.activeStrategy != ContextStrategyType.SLIDING_WINDOW &&
                             uiState.activeStrategy != ContextStrategyType.SUMMARY
                         ) {
@@ -246,6 +238,20 @@ fun ChatContent(
                             },
                             enabled = !uiState.isLoading
                         )
+
+                        // MCP Tools — показываем только если mcpViewModel передан
+                        if (mcpViewModel != null) {
+                            DropdownMenuItem(
+                                text = { Text("MCP Tools") },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Build, contentDescription = null)
+                                },
+                                onClick = {
+                                    overflowExpanded = false
+                                    isMcpDialogOpen = true
+                                }
+                            )
+                        }
                     }
                 }
             )
@@ -258,7 +264,7 @@ fun ChatContent(
         )
     }
 
-    // ── Branch dialog ─────────────────────────────────────────────────────
+    // ── Branch dialog ──────────────────────────────────────────────────────
     if (uiState.isBranchDialogOpen) {
         BranchSwitchDialog(
             branches = uiState.branches,
@@ -268,7 +274,7 @@ fun ChatContent(
         )
     }
 
-    // ── Start Task dialog (Planning mode) ─────────────────────────────────
+    // ── Start Task dialog (Planning mode) ──────────────────────────────────
     if (uiState.isStartTaskDialogOpen) {
         StartTaskDialog(
             onDismiss = { handleIntent(ChatIntent.CloseStartTaskDialog) },
@@ -278,7 +284,7 @@ fun ChatContent(
         )
     }
 
-    // ── Task validation / advance error dialog ────────────────────────────
+    // ── Task validation / advance error dialog ─────────────────────────────
     val taskError = uiState.taskValidationError
     if (taskError != null) {
         AlertDialog(
@@ -290,6 +296,14 @@ fun ChatContent(
                     Text("OK")
                 }
             }
+        )
+    }
+
+    // ── MCP Tools dialog ───────────────────────────────────────────────────
+    if (isMcpDialogOpen && mcpViewModel != null) {
+        McpToolsDialog(
+            viewModel = mcpViewModel,
+            onDismiss = { isMcpDialogOpen = false }
         )
     }
 }

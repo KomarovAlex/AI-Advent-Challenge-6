@@ -18,12 +18,14 @@ import ru.koalexse.aichallenge.agent.context.summary.JsonSummaryStorage
 import ru.koalexse.aichallenge.agent.context.summary.LLMSummaryProvider
 import ru.koalexse.aichallenge.agent.context.summary.SimpleSummaryProvider
 import ru.koalexse.aichallenge.agent.context.summary.SummaryProvider
+import ru.koalexse.aichallenge.agent.mcp.McpClient
 import ru.koalexse.aichallenge.agent.profile.ActiveProfileSystemPromptProvider
 import ru.koalexse.aichallenge.agent.profile.ProfileSystemPromptProvider
 import ru.koalexse.aichallenge.agent.task.TaskStateMachineAgent
 import ru.koalexse.aichallenge.data.LLMApi
 import ru.koalexse.aichallenge.data.OpenAIApi
 import ru.koalexse.aichallenge.data.StatsTrackingLLMApi
+import ru.koalexse.aichallenge.data.mcp.KtorMcpClient
 import ru.koalexse.aichallenge.data.persistence.ChatHistoryRepository
 import ru.koalexse.aichallenge.data.persistence.JsonBranchStorage
 import ru.koalexse.aichallenge.data.persistence.JsonChatHistoryRepository
@@ -32,6 +34,7 @@ import ru.koalexse.aichallenge.data.persistence.JsonMemoryStorage
 import ru.koalexse.aichallenge.data.persistence.JsonTaskStateStorage
 import ru.koalexse.aichallenge.data.persistence.profile.JsonProfileStorage
 import ru.koalexse.aichallenge.ui.AgentChatViewModel
+import ru.koalexse.aichallenge.ui.mcp.McpViewModel
 import ru.koalexse.aichallenge.ui.profile.ProfileEditViewModel
 import ru.koalexse.aichallenge.ui.profile.ProfileListViewModel
 import ru.koalexse.aichallenge.ui.state.ContextStrategyType
@@ -40,6 +43,7 @@ class AppModule(
     private val context: Context,
     private val apiKey: String,
     private val baseUrl: String,
+    private val mcpUrl: String,
     private val availableModels: List<String>,
     private val defaultModel: String = availableModels.firstOrNull() ?: "gpt-4"
 ) {
@@ -68,6 +72,18 @@ class AppModule(
         JsonProfileStorage(context)
     }
 
+    // ==================== MCP ====================
+
+    /**
+     * MCP-клиент для сервера вкусвилла.
+     *
+     * Один экземпляр на приложение — переиспользует OkHttpClient.
+     * Интерфейс [McpClient] живёт в `agent/mcp/`, реализация [KtorMcpClient] в `data/mcp/`.
+     */
+    val mcpClient: McpClient by lazy {
+        KtorMcpClient(baseUrl = mcpUrl)
+    }
+
     // ==================== Профиль ====================
 
     /**
@@ -89,12 +105,6 @@ class AppModule(
 
     // ==================== Фабрика стратегий ====================
 
-    /**
-     * Возвращает стратегию обрезки контекста для обычного агента.
-     *
-     * Task State Machine — отдельный режим ([AgentChatViewModel.isPlanningMode]),
-     * не стратегия. Для него используется [createTaskStateMachineAgent].
-     */
     fun buildStrategy(type: ContextStrategyType): ContextTruncationStrategy? = when (type) {
         ContextStrategyType.SLIDING_WINDOW -> SlidingWindowStrategy()
 
@@ -122,15 +132,6 @@ class AppModule(
 
     // ==================== Task State Machine ====================
 
-    /**
-     * Создаёт [TaskStateMachineAgent] — обёртку над отдельным [SimpleLLMAgent]
-     * с [SummaryTruncationStrategy] внутри.
-     *
-     * [JsonTaskStateStorage] персистирует состояние задачи в `task_state.json`.
-     * Состояние сохраняется между сессиями — пауза и продолжение без повторных объяснений.
-     *
-     * @param maxRetries максимальное число повторных попыток при нарушении инвариантов
-     */
     fun createTaskStateMachineAgent(maxRetries: Int = TaskStateMachineAgent.DEFAULT_MAX_RETRIES): TaskStateMachineAgent {
         val innerStrategy = SummaryTruncationStrategy(
             summaryProvider = LLMSummaryProvider(api = statsLLMApi, model = defaultModel),
@@ -166,7 +167,6 @@ class AppModule(
             truncationStrategy = initialStrategy,
             profilePromptProvider = profilePromptProvider
         )
-        // TaskStateMachineAgent создаётся один раз — персистентное состояние
         val taskAgent = createTaskStateMachineAgent(maxRetries)
         return AgentChatViewModel(
             agent = agent,
@@ -229,6 +229,9 @@ class AppModule(
         )
     }
 
+    /** MCP ViewModel — один экземпляр, переиспользует [mcpClient]. */
+    fun createMcpViewModel(): McpViewModel = McpViewModel(mcpClient)
+
     // ==================== Прочее ====================
 
     fun createAgentWithBuilder(block: AgentBuilderScope.() -> Unit): ConfigurableAgent {
@@ -261,7 +264,8 @@ class AppModule(
     }
 
     companion object {
-        private const val FACTS_EXTRACTION_PROMPT = """You are a personal profile analyzer. Extract key facts about the user from the text below.
+        private const val FACTS_EXTRACTION_PROMPT =
+            """You are a personal profile analyzer. Extract key facts about the user from the text below.
 
 Requirements:
 - Output ONLY a bullet list of facts, one per line, starting with "-"
@@ -285,14 +289,25 @@ object AppContainer {
         context: Context,
         apiKey: String,
         baseUrl: String,
+        mcpUrl: String,
         availableModels: List<String>,
         defaultModel: String = availableModels.firstOrNull() ?: "gpt-4"
     ): AppModule {
-        _module = AppModule(context.applicationContext, apiKey, baseUrl, availableModels, defaultModel)
+        _module =
+            AppModule(
+                context.applicationContext,
+                apiKey,
+                baseUrl,
+                mcpUrl,
+                availableModels,
+                defaultModel
+            )
         return module
     }
 
     val isInitialized: Boolean get() = _module != null
 
-    fun reset() { _module = null }
+    fun reset() {
+        _module = null
+    }
 }

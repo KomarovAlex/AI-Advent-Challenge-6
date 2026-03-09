@@ -7,6 +7,7 @@ import ru.koalexse.aichallenge.agent.context.facts.Fact
 import ru.koalexse.aichallenge.agent.context.memory.MemoryEntry
 import ru.koalexse.aichallenge.agent.task.TaskPhase
 import ru.koalexse.aichallenge.agent.task.TaskState
+import ru.koalexse.aichallenge.domain.McpTool
 import ru.koalexse.aichallenge.domain.Message
 import ru.koalexse.aichallenge.domain.SessionTokenStats
 
@@ -128,7 +129,18 @@ data class ChatUiState(
     val isAdvancingPhase: Boolean = false,
 
     /** Открыт ли диалог запуска новой задачи (ввод инвариантов) */
-    val isStartTaskDialogOpen: Boolean = false
+    val isStartTaskDialogOpen: Boolean = false,
+
+    // ==================== MCP ====================
+
+    /** true пока идёт запрос к MCP-серверу */
+    val isMcpLoading: Boolean = false,
+
+    /** Список инструментов MCP (null = ещё не запрашивались) */
+    val mcpTools: List<McpTool>? = null,
+
+    /** Открыт ли диалог со списком MCP-инструментов */
+    val isMcpDialogOpen: Boolean = false,
 )
 
 data class SettingsData(

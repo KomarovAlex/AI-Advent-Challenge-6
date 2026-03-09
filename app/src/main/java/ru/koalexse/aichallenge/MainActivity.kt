@@ -16,6 +16,7 @@ import ru.koalexse.aichallenge.di.AppContainer
 import ru.koalexse.aichallenge.ui.AgentChatViewModel
 import ru.koalexse.aichallenge.ui.ChatContent
 import ru.koalexse.aichallenge.ui.ChatIntent
+import ru.koalexse.aichallenge.ui.mcp.McpViewModel
 import ru.koalexse.aichallenge.ui.navigation.ChatRoute
 import ru.koalexse.aichallenge.ui.navigation.ProfileEditRoute
 import ru.koalexse.aichallenge.ui.navigation.ProfileListRoute
@@ -32,6 +33,7 @@ class MainActivity : ComponentActivity() {
             context = applicationContext,
             apiKey = BuildConfig.OPENAI_API_KEY,
             baseUrl = BuildConfig.OPENAI_URL,
+            mcpUrl = BuildConfig.MCP_URL,
             availableModels = BuildConfig.OPENAI_MODELS.split(",")
         )
     }
@@ -40,13 +42,18 @@ class MainActivity : ComponentActivity() {
         appModule.createAgentChatViewModelWithCompression()
     }
 
+    private val mcpViewModel: McpViewModel by lazy {
+        appModule.createMcpViewModel()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             AppNavigation(
                 chatState = chatViewModel.state.collectAsState(),
                 handleChatIntent = chatViewModel::handleIntent,
-                appModule = appModule
+                appModule = appModule,
+                mcpViewModel = mcpViewModel
             )
         }
     }
@@ -56,11 +63,11 @@ class MainActivity : ComponentActivity() {
 fun AppNavigation(
     chatState: State<ChatUiState>,
     handleChatIntent: (ChatIntent) -> Unit,
-    appModule: ru.koalexse.aichallenge.di.AppModule
+    appModule: ru.koalexse.aichallenge.di.AppModule,
+    mcpViewModel: McpViewModel
 ) {
     val backStack = rememberNavBackStack(ChatRoute)
 
-    // ViewModels для профилей создаём один раз — они переживают смену ключей в backStack
     val profileListViewModel = remember { appModule.createProfileListViewModel() }
     val profileEditViewModel = remember { appModule.createProfileEditViewModel() }
 
@@ -70,7 +77,8 @@ fun AppNavigation(
             ChatContent(
                 state = chatState,
                 handleIntent = handleChatIntent,
-                onNavigateToProfiles = { backStack.add(ProfileListRoute) }
+                onNavigateToProfiles = { backStack.add(ProfileListRoute) },
+                mcpViewModel = mcpViewModel
             )
         }
 
